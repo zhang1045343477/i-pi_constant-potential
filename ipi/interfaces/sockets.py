@@ -21,6 +21,7 @@ import json
 
 from ipi.utils.messages import verbosity, warning, info
 from ipi.utils.softexit import softexit
+from ipi.utils.units import Constants
 
 from concurrent.futures import ThreadPoolExecutor
 
@@ -55,6 +56,7 @@ MESSAGE = {
         "posdata",
         "getforce",
         "forceready",
+        "chgdata",
     ]
 }
 
@@ -419,6 +421,33 @@ class Driver(DriverSocket):
         else:
             raise InvalidStatus("Status in sendpos was " + self.status)
 
+    def sendchg(self, nelect, solvation_flag=1):
+        """Sends updated electronic charge (NELECT) and solvation flag to the driver.
+
+        Uses the CHGDATA header followed by:
+            - float64: nelect
+            - int32: solvation_flag
+
+        This is a lightweight message that does not change the driver's status
+        flags; it is intended to be sent while the client is Ready, before
+        sending POSDATA for the next force evaluation.
+        """
+
+        if not (self.status & Status.Ready):
+            raise InvalidStatus("Status in sendchg was " + str(self.status))
+
+        try:
+            payload_nelect = np.float64(nelect)
+            payload_solv = np.int32(solvation_flag)
+            self.sendall(
+                MESSAGE["chgdata"] + payload_nelect.tobytes() + payload_solv.tobytes()
+            )
+        except Exception as exc:
+            warning(
+                f" @SOCKET:   Exception during CHGDATA send: {exc}",
+                verbosity.quiet,
+            )
+
     def getforce(self):
         """Gets the potential energy, force and virial from the driver.
 
@@ -486,17 +515,17 @@ class Driver(DriverSocket):
         if mxtra:
             try:
                 mxtradict = json.loads(mxtra)
-                info(
-                    "@driver.getforce: Extra string JSON has been loaded.",
-                    verbosity.debug,
-                )
+                # info(
+                #     "@driver.getforce: Extra string JSON has been loaded.",
+                #     verbosity.debug,
+                # )
             except:
                 # if we can't parse it as a dict, issue a warning and carry on
-                info(
-                    "@driver.getforce: Extra string could not be loaded as a dictionary. Extra="
-                    + mxtra,
-                    verbosity.debug,
-                )
+                # info(
+                #     "@driver.getforce: Extra string could not be loaded as a dictionary. Extra="
+                #     + mxtra,
+                #     verbosity.debug,
+                # )
                 mxtradict = {}
                 pass
             if "raw" in mxtradict:
@@ -534,6 +563,26 @@ class Driver(DriverSocket):
                 verbosity.low,
             )
             return
+
+        # If the request carries an updated electronic charge (NELECT), send it
+        # to the driver before sending positions, using the lightweight CHGDATA
+        # message.
+        #
+        # The CHGDATA payload is:
+        #   - float64: nelect
+        #   - int32: solvation_flag
+        #
+        # solvation_flag defaults to 1 (enable every step) unless overridden.
+        nelect = r.get("nelect", None)
+        solvation_flag = r.get("solvation_flag", 1)
+        if nelect is not None:
+            try:
+                self.sendchg(nelect, int(solvation_flag))
+            except Exception as exc:
+                warning(
+                    f" @SOCKET:   Failed to send CHGDATA for request {r['id']}: {exc}",
+                    verbosity.low,
+                )
 
         r["start"] = time.time()
         self.sendpos(r["pos"][r["active"]], r["cell"])
@@ -1018,3 +1067,378 @@ class InterfaceSocket(object):
             return 0  # client will be cleared and request resuscitated in poll_update
 
         return -1
+
+
+class CP2KSocketServer:
+    """Dedicated CP2K socket server for constant potential simulations.
+
+    This class manages a single TCP server socket for communication with
+    one CP2K process in constant potential molecular dynamics simulations.
+    It implements the i-PI socket protocol with CP2K-specific extensions
+    for Fermi level extraction and charge state management.
+    """
+
+    def __init__(self, host="localhost", port=12345, timeout=30.0):
+        """Initialize CP2K socket server.
+
+        Args:
+            host: Host address for socket binding
+            port: Port number for socket binding
+            timeout: Timeout in seconds for operations
+        """
+        self.host = host
+        self.port = port
+        self.timeout = timeout
+
+        # Server socket for accepting connections
+        self.server_socket = None
+        self.client_socket = None
+        self.is_connected = False
+        self.is_listening = False
+
+        info(f" @CP2KSocketServer: Initialized server for {host}:{port}", verbosity.medium)
+
+    def create_server(self):
+        """Create and bind TCP server socket.
+
+        Returns:
+            bool: True if server created successfully
+        """
+        try:
+            self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            self.server_socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+
+            self.server_socket.bind((self.host, self.port))
+            self.server_socket.listen(1)
+            self.is_listening = True
+
+            info(f" @CP2KSocketServer: Created server on {self.host}:{self.port}", verbosity.medium)
+            return True
+
+        except Exception as e:
+            warning(f" @CP2KSocketServer: Failed to create server: {e}", verbosity.medium)
+            self.cleanup()
+            return False
+
+    def accept_connection(self, timeout=None):
+        """Accept connection from CP2K client.
+
+        Args:
+            timeout: Timeout in seconds (None for default)
+
+        Returns:
+            bool: True if connection accepted successfully
+        """
+        if not self.server_socket or not self.is_listening:
+            warning(" @CP2KSocketServer: No server socket available", verbosity.medium)
+            return False
+
+        if self.is_connected and self.client_socket:
+            info(" @CP2KSocketServer: Already connected to client", verbosity.debug)
+            return True
+
+        try:
+            timeout = timeout or self.timeout
+            self.server_socket.settimeout(timeout)
+
+            info(f" @CP2KSocketServer: Waiting for CP2K client connection on port {self.port}", verbosity.medium)
+            self.client_socket, addr = self.server_socket.accept()
+
+            # Disable timeout after connection established
+            self.client_socket.settimeout(None)
+            self.is_connected = True
+
+            info(f" @CP2KSocketServer: Accepted connection from {addr}", verbosity.medium)
+            return True
+
+        except Exception as e:
+            warning(f" @CP2KSocketServer: Failed to accept connection: {e}", verbosity.medium)
+            return False
+
+    def is_connection_healthy(self):
+        """Check if the socket connection is still healthy.
+
+        Returns:
+            bool: True if connection is healthy
+        """
+        try:
+            import select
+
+            if not self.is_connected or not self.client_socket:
+                return False
+
+            # Use select to check if socket is readable (might indicate disconnection)
+            ready, _, _ = select.select([self.client_socket], [], [], 0.001)
+            if ready:
+                try:
+                    data = self.client_socket.recv(1, socket.MSG_PEEK | socket.MSG_DONTWAIT)
+                    if not data:
+                        # Connection closed by peer
+                        return False
+                except socket.error as e:
+                    if e.errno in (socket.EWOULDBLOCK, socket.EAGAIN):
+                        # No data available, connection is healthy
+                        return True
+                    else:
+                        # Connection error
+                        return False
+
+            return True
+
+        except Exception:
+            return False
+
+    def close_connection(self):
+        """Close client connection."""
+        if self.client_socket:
+            try:
+                self.client_socket.close()
+                info(" @CP2KSocketServer: Closed client connection", verbosity.debug)
+            except Exception as e:
+                warning(f" @CP2KSocketServer: Error closing client: {e}", verbosity.medium)
+            finally:
+                self.client_socket = None
+                self.is_connected = False
+
+    def cleanup(self):
+        """Clean up all socket resources."""
+        self.close_connection()
+
+        if self.server_socket:
+            try:
+                self.server_socket.close()
+                info(" @CP2KSocketServer: Closed server socket", verbosity.debug)
+            except Exception as e:
+                warning(f" @CP2KSocketServer: Error closing server: {e}", verbosity.medium)
+            finally:
+                self.server_socket = None
+                self.is_listening = False
+
+
+class CP2KSocketCommunicator:
+    """CP2K socket communication handler for i-PI protocol.
+
+    This class implements the complete i-PI socket communication protocol
+    specifically for CP2K interactions in constant potential simulations.
+    It handles data serialization, message passing, and error recovery.
+    """
+
+    def __init__(self, socket_server):
+        """Initialize CP2K socket communicator.
+
+        Args:
+            socket_server: CP2KSocketServer instance
+        """
+        self.server = socket_server
+        self.last_error = None
+
+    def send_positions_and_get_forces(self, positions, cell_h, charge=None):
+        """Send positions to CP2K and receive energy, forces, and Fermi level.
+
+        This method implements the complete i-PI communication cycle:
+        STATUS → READY/HAVEDATA → [POSDATA] → GETFORCE → FORCEREADY + data
+
+        Args:
+            positions: Atomic positions array (3*natoms)
+            cell_h: Cell matrix (3x3)
+            charge: Optional charge parameter for endpoint identification
+
+        Returns:
+            dict: Results with keys 'energy', 'forces', 'virial', 'fermi_level', etc.
+                 Returns None on failure.
+        """
+        if not self.server.is_connected or not self.server.client_socket:
+            warning(" @CP2KSocketCommunicator: No active connection", verbosity.medium)
+            return None
+
+        if not self.server.is_connection_healthy():
+            warning(" @CP2KSocketCommunicator: Connection unhealthy, attempting reconnect", verbosity.medium)
+            if not self.server.accept_connection(timeout=30.0):
+                warning(" @CP2KSocketCommunicator: Failed to reconnect", verbosity.medium)
+                return None
+
+        try:
+            return self._execute_ipi_protocol(positions, cell_h, charge)
+
+        except Exception as e:
+            error_msg = str(e).lower()
+            self.last_error = str(e)
+
+            # Smart error classification
+            connection_error_keywords = ['connection', 'socket', 'broken', 'closed', 'reset', 'refused', 'timeout']
+            is_connection_error = any(keyword in error_msg for keyword in connection_error_keywords)
+
+            if is_connection_error:
+                warning(f" @CP2KSocketCommunicator: Connection error, marking for reconnection: {e}", verbosity.medium)
+                self.server.is_connected = False
+                self.server.close_connection()
+            else:
+                # info(f" @CP2KSocketCommunicator: Recoverable error, keeping connection: {e}", verbosity.medium)
+
+            return None
+
+    def _execute_ipi_protocol(self, positions, cell_h, charge):
+        """Execute the complete i-PI socket protocol with CP2K.
+
+        Args:
+            positions: Atomic positions array
+            cell_h: Cell matrix
+            charge: Endpoint charge for logging
+
+        Returns:
+            dict: CP2K calculation results
+        """
+        client_socket = self.server.client_socket
+        natoms = len(positions) // 3
+
+        # Prepare data arrays
+        positions_array = np.array(positions, dtype=np.float64)
+        h = np.array(cell_h, dtype=np.float64).reshape((3, 3))
+        h_ih = np.linalg.inv(h)
+        h_flat = h.flatten()
+        ih_flat = h_ih.flatten()
+
+        # info(f" @CP2KSocketCommunicator: Starting i-PI protocol for charge {charge}", verbosity.medium)
+
+        # Step 1: Send STATUS to query CP2K state
+        client_socket.sendall(MESSAGE["status"])
+        # info(f" @CP2KSocketCommunicator: Sent STATUS to CP2K client {charge}", verbosity.debug)
+
+        # Step 2: Receive READY or HAVEDATA
+        header = client_socket.recv(HDRLEN)
+        header_str = header.decode('utf-8').strip()
+        # info(f" @CP2KSocketCommunicator: Received '{header_str}' from CP2K client {charge}", verbosity.debug)
+
+        if header_str == "READY":
+            # Send position data
+            posdata_msg = (
+                MESSAGE["posdata"] +
+                h_flat.tobytes() +
+                ih_flat.tobytes() +
+                np.int32(natoms).tobytes() +
+                positions_array.tobytes()
+            )
+            client_socket.sendall(posdata_msg)
+            # info(f" @CP2KSocketCommunicator: Sent POSDATA to CP2K client {charge}", verbosity.debug)
+
+        elif header_str == "HAVEDATA":
+            # info(f" @CP2KSocketCommunicator: CP2K client {charge} already has data", verbosity.debug)
+
+        else:
+            raise ValueError(f"Expected 'READY' or 'HAVEDATA', got '{header_str}'")
+
+        # Step 3: Send GETFORCE to request results
+        client_socket.sendall(MESSAGE["getforce"])
+        # info(f" @CP2KSocketCommunicator: Sent GETFORCE to CP2K client {charge}", verbosity.debug)
+
+        # Step 4: Wait for FORCEREADY
+        reply = client_socket.recv(HDRLEN)
+        if reply != MESSAGE["forceready"]:
+            raise ValueError(f"Expected 'forceready', got {reply}")
+        # info(f" @CP2KSocketCommunicator: Received FORCEREADY from CP2K client {charge}", verbosity.debug)
+
+        # Step 5: Receive calculation results
+        return self._receive_cp2k_results(client_socket, natoms, charge)
+
+    def _receive_cp2k_results(self, client_socket, natoms, charge):
+        """Receive and parse CP2K calculation results.
+
+        Args:
+            client_socket: Connected socket
+            natoms: Number of atoms
+            charge: Endpoint charge for logging
+
+        Returns:
+            dict: Parsed results
+        """
+        def recv_all(sock, dest):
+            """Receive all data for a numpy array."""
+            blen = dest.itemsize * dest.size
+            buf = np.zeros(blen, np.byte)
+            bpos = 0
+
+            while bpos < blen:
+                chunk = sock.recv(blen - bpos)
+                if not chunk:
+                    raise socket.error("Socket connection broken")
+                buf[bpos:bpos+len(chunk)] = np.frombuffer(chunk, dtype=np.byte)
+                bpos += len(chunk)
+
+            return np.frombuffer(buf, dtype=dest.dtype).reshape(dest.shape)
+
+        # Receive energy (1 float64)
+        energy_array = np.zeros(1, dtype=np.float64)
+        energy_array = recv_all(client_socket, energy_array)
+        energy = float(energy_array[0])
+
+        # Receive natoms confirmation (1 int32)
+        mlen_array = np.zeros(1, dtype=np.int32)
+        mlen_array = recv_all(client_socket, mlen_array)
+        received_natoms = int(mlen_array[0])
+
+        if received_natoms != natoms:
+            raise ValueError(f"Atom count mismatch: expected {natoms}, got {received_natoms}")
+
+        # Receive forces (3*natoms float64)
+        forces = np.zeros(3 * natoms, dtype=np.float64)
+        forces = recv_all(client_socket, forces)
+
+        # Receive virial (9 float64)
+        virial_flat = np.zeros(9, dtype=np.float64)
+        virial_flat = recv_all(client_socket, virial_flat)
+        virial = virial_flat.reshape((3, 3))
+
+        # Receive extra string length (1 int32)
+        extra_len_array = np.zeros(1, dtype=np.int32)
+        extra_len_array = recv_all(client_socket, extra_len_array)
+        extra_len = int(extra_len_array[0])
+
+        # Parse CP2K extras (JSON format)
+        fermi_level = None
+        converged = True
+        extra_dict = {}
+
+        if extra_len > 0:
+            extra_bytes = np.zeros(extra_len, dtype=np.dtype('S1'))
+            extra_bytes = recv_all(client_socket, extra_bytes)
+            extra_string = bytearray(extra_bytes).decode('utf-8')
+
+            try:
+                import json
+                extra_dict = json.loads(extra_string)
+
+                # Extract Fermi level from CP2K
+                if 'fermi_level_eV' in extra_dict:
+                    fermi_level = float(extra_dict['fermi_level_eV'])
+                elif 'fermi_level' in extra_dict:
+                    fermi_level = float(extra_dict['fermi_level'])
+
+                # Extract convergence status
+                if 'scf_converged' in extra_dict:
+                    converged = bool(extra_dict['scf_converged'])
+                elif 'converged' in extra_dict:
+                    converged = bool(extra_dict['converged'])
+
+                # info(f" @CP2KSocketCommunicator: Parsed CP2K extras {charge}: fermi={fermi_level} eV, converged={converged}", verbosity.debug)
+
+            except json.JSONDecodeError:
+                warning(f" @CP2KSocketCommunicator: Could not parse extra JSON: {extra_string[:100]}...", verbosity.medium)
+
+        # Convert Fermi level from eV to atomic units (Hartree) for i-PI
+        fermi_level_au = fermi_level / Constants.EV_PER_HARTREE if fermi_level is not None else None
+
+        # info(f" @CP2KSocketCommunicator: Results from charge {charge} - Energy: {energy:.6f} Ha, Fermi: {fermi_level} eV", verbosity.medium)
+
+        return {
+            "energy": energy,           # in Hartree
+            "forces": forces,           # in Hartree/Bohr
+            "virial": virial,          # in Hartree
+            "fermi_level": fermi_level, # in eV
+            "fermi_level_au": fermi_level_au,  # in Hartree
+            "charge": charge,
+            "converged": converged,
+            "is_real_data": True,
+            "data_source": "cp2k_socket",
+            "extras": extra_dict
+        }
