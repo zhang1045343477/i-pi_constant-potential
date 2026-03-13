@@ -1039,8 +1039,9 @@ class InputAttribute(Input):
            A string giving the stored value in the appropriate format.
         """
 
+        if self.value is None:
+            return ""
         return name + "='" + write_type(self.type, self.value) + "'"
-
 
 class InputValue(InputAttribute):
     """Class for handling scalar input.
