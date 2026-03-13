@@ -1,0 +1,65 @@
+<simulation verbosity='medium'>
+  <output prefix='PtNe_vasp_Ne_doping'>
+    <properties stride='1' filename='simulation'>[ step, time{picosecond}, conserved{electronvolt},
+        temperature{kelvin}, kinetic_cv{electronvolt}, potential{electronvolt},
+        electronic_charge, fermi_level{electronvolt}, workfunction{electronvolt},
+        workfunction_target{electronvolt} ]</properties>
+    <trajectory filename='positions' stride='10' cell_units='angstrom'>positions{angstrom}</trajectory>
+    <checkpoint stride='1'>
+    </checkpoint>
+  </output>
+
+  <total_steps>20</total_steps>
+  <prng>
+    <seed>12345</seed>
+  </prng>
+
+  <ffsocket name='vasp_cp' mode='inet' matching='auto' charge='true' mixing='false' Ne_doping='true'>
+    <address>localhost</address>
+    <port>18000</port>
+    <slots>1</slots>
+    <timeout units='second'>600.0</timeout>
+  </ffsocket>
+
+  <system>
+    <initialize nbeads='1'>
+      <file mode='xyz' units='angstrom'>36Pt+12Ne_REV.xyz</file>
+      <cell mode='abc' units='angstrom'>[ 9.7918, 8.48, 40.0 ]</cell>
+      <velocities mode='thermal' units='kelvin'> 300 </velocities>
+    </initialize>
+
+    <forces>
+      <force forcefield='vasp_cp'>
+      </force>
+    </forces>
+
+    <ensemble>
+      <temperature units='kelvin'>300.0</temperature>
+    </ensemble>
+
+    <motion mode='dynamics'>
+      <fixatoms> [ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 36, 37, 38, 39, 40, 41, 42, 43,44, 45, 46, 47 ]</fixatoms>
+
+      <dynamics mode='nvt'>
+        <timestep units='femtosecond'>1.0</timestep>
+        <thermostat mode='langevin'>
+          <tau units='femtosecond'>200.0</tau>
+        </thermostat>
+
+        <electrons enabled='true'>
+          <target_workfunction units='electronvolt'>9.0</target_workfunction>
+          <z_average_region units='angstrom'>[ 25.0, 30.0 ]</z_average_region>
+          <q_init>456.0</q_init>
+          <neutral_electrons>456</neutral_electrons>
+          <mass units='dalton'>200.0</mass>
+          <potentiostat mode='svr'>
+            <tau units='femtosecond'>200.0</tau>
+            <temp units='kelvin'>300</temp>
+          </potentiostat>
+          <log_stride>1</log_stride>
+        </electrons>
+		
+      </dynamics>
+    </motion>
+  </system>
+</simulation>

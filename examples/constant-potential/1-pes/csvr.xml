@@ -1,0 +1,61 @@
+<simulation verbosity='medium'>
+  <output prefix='cp-pes'>
+    <properties stride='1' filename='simulation'>
+      [ step, time{femtosecond}, conserved{electronvolt}, temperature{kelvin},
+        kinetic_cv{electronvolt}, potential{electronvolt},
+        electronic_charge, fermi_level{electronvolt}, fermi_level_target{electronvolt}]
+    </properties>
+    <trajectory filename='pos' stride='100' format='xyz' cell_units='angstrom'>positions{angstrom}</trajectory>
+  </output>
+
+  <total_steps>10000</total_steps>
+  <prng>
+    <seed>12345</seed>
+  </prng>
+
+  <ffdirect name='toy_pes'>
+    <pes> asym_dw_constant_potential </pes>
+    <parameters> { a:1.0, b:3.0, d:1.0, x0:0.0, c:-10.0, pzc:5.0, cap:10.0, q_default:0.0 } </parameters>
+  </ffdirect>
+
+  <system>
+    <initialize nbeads='1'>
+      <cell mode='abc' units='angstrom'>
+        [ 5.0, 5.0, 5.0 ]
+      </cell>
+      <file mode='xyz' units='angstrom'> pos_init.xyz </file>
+      <velocities mode='thermal' units='kelvin'>300.0</velocities>
+    </initialize>
+
+    <forces>
+      <force forcefield='toy_pes'/>
+    </forces>
+
+    <ensemble>
+      <temperature units='kelvin'>300.0</temperature>
+    </ensemble>
+
+    <motion mode='dynamics'>
+      <fixatoms_dof> [ 1, 2 ] </fixatoms_dof>
+      <dynamics mode='nvt'>
+        <timestep units='femtosecond'>1.0</timestep>
+        <thermostat mode='langevin'>
+          <tau units='femtosecond'>500.0</tau>
+        </thermostat>
+
+        <electrons enabled='true'>
+          <target_fermi_level units='electronvolt'>-4.5</target_fermi_level>
+          <q_init>1.0</q_init>
+          <mass units='dalton'>300.0</mass>
+          <neutral_electrons>2</neutral_electrons>
+          <potentiostat mode='svr'>
+            <tau units='femtosecond'>500.0</tau>
+            <temp units='kelvin'>300.0</temp>
+          </potentiostat>
+          <log_stride>1</log_stride>
+        </electrons>
+		
+      </dynamics>
+    </motion>
+  </system>
+</simulation>

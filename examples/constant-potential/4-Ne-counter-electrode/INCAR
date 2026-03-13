@@ -1,0 +1,45 @@
+System = constant potential via i-PI (Ne_doping)
+
+ISTART = 0
+ICHARG = 2
+LREAL = .FALSE.
+ENCUT = 500
+PREC  = Accurate
+ALGO = Normal
+ISYM = 0
+
+NELM   = 500
+NELMIN = 5
+EDIFF  = 1E-5
+EDIFFG = -0.02
+
+ISPIN  = 1
+ISMEAR = 1
+SIGMA = 0.2
+ISIF=2
+IVDW   = 11
+LDIPOL = .TRUE.
+IDIPOL = 3
+
+IBRION = 24
+
+LCHARG = .FALSE.
+LAECHG = .TRUE. 
+LWAVE = .FALSE.
+LPLANE = .TRUE.
+LSCALU = .FALSE.
+LVHAR = .TRUE.
+
+NBANDS = 400
+AMIX  = 0.2
+BMIX  = 0.0001
+MAXMIX = 80
+LMAXMIX = 4
+
+NSIM   = 4
+NCORE = 32
+NWRITE = 0
+
+IHOST  = localhost
+PORT   = 18000
+INET   = 1

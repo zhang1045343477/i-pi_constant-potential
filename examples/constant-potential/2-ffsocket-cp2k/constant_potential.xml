@@ -1,0 +1,65 @@
+<simulation verbosity='medium'>
+  <output prefix='Al'>
+    <properties stride='1' filename='simulation'>[ step, time{picosecond}, conserved{electronvolt}, temperature{kelvin},
+        kinetic_cv{electronvolt}, potential{electronvolt},
+        electronic_charge, fermi_level{electronvolt}, workfunction{electronvolt}, workfunction_target{electronvolt}]</properties>
+    <trajectory filename='positions' stride='10' cell_units='angstrom'>positions{angstrom}</trajectory>
+    <checkpoint stride='5000'>
+    </checkpoint>
+  </output>
+
+  <total_steps>5000</total_steps>
+  <prng>
+    <seed>12345</seed>
+  </prng>
+
+ <!-- The path of the cp2k executable file is required so that the charge endpoints can be automatically switched.  -->
+ <ffsocket mode='inet' name='ffmixtwosockets'  charge='true'  mixing='true'>
+    <client_template>cp2k_md_template.inp</client_template>
+    <client_exe>path_to_cp2k/cp2k.psmp</client_exe>
+    <client_env>source path_to_cp2k/tools/toolchain/install/setup</client_env>
+    <client1_run_cmd> mpirun  -np 48</client_run_cmd>
+	<client2_run_cmd> mpirun  -np 48</client_run_cmd>
+    <switch_threshold>0.05</switch_threshold>
+    <auto_switch>true</auto_switch>
+    <host>localhost</host>
+    <port_base>18000</port_base>
+  </ffsocket>
+
+  <system>
+    <initialize nbeads='1'>
+      <file mode='xyz' units='angstrom'>36Al_REV.xyz</file>
+      <cell mode='abc' units='angstrom'>[ 9.9204, 8.5931, 20.0 ]</cell>
+    </initialize>
+    <forces>
+      <force forcefield='ffmixtwosockets'>
+      </force>
+    </forces>
+    <ensemble>
+      <temperature units='kelvin'>300</temperature>
+    </ensemble>
+    <motion mode='dynamics'>
+	  <fixatoms> [ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11 ]</fixatoms>
+      <dynamics mode='nvt'>
+        <timestep units='femtosecond'>1.0</timestep>
+        <thermostat mode='langevin'>
+          <tau units='femtosecond'>200</tau>
+        </thermostat>
+		
+        <electrons enabled='true'>
+          <target_workfunction units='electronvolt'>5.0</target_workfunction>
+          <z_average_region units='angstrom'>[ 10.0, 17.5 ]</z_average_region>
+          <q_init>108.0</q_init>
+          <neutral_electrons>108</neutral_electrons>
+          <mass units='dalton'>200.0</mass>
+          <potentiostat mode='svr'>
+            <tau units='femtosecond'>200.0</tau>
+            <temp units='kelvin'>300</temp>
+          </potentiostat>
+          <log_stride>1</log_stride>
+        </electrons>
+		
+      </dynamics>
+    </motion>
+  </system>
+</simulation>
