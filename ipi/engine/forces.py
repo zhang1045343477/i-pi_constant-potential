@@ -818,6 +818,11 @@ class Forces:
                 epsilon=fc.epsilon,
             )
             newbeads = Beads(beads.natoms, newb)
+            # propagate atomic masses and labels so that contracted beads
+            # used for force evaluation carry the same metadata as the
+            # full path-integral beads.
+            newbeads.m[:] = beads.m
+            newbeads.names[:] = beads.names
             newrpc = nm_rescale(beads.nbeads, newb, open_paths=self.open_paths)
 
             # the beads positions for this force components are obtained

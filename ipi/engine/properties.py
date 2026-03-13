@@ -961,6 +961,36 @@ class Properties:
                                can be used to recover fermionic statistics from bosonic simulations,
                                see doi:10.1063/5.0008720.""",
             },
+            "electronic_charge": {
+                "dimension": "number",
+                "help": "The current electronic charge for constant potential simulations.",
+                "func": self.get_electronic_charge,
+            },
+            "fermi_level": {
+                "dimension": "energy",
+                "help": "The current Fermi level for constant potential simulations.",
+                "func": self.get_fermi_level,
+            },
+            "fermi_level_target": {
+                "dimension": "energy",
+                "help": "The target Fermi level for constant potential simulations.",
+                "func": self.get_fermi_level_target,
+            },
+            "workfunction": {
+                "dimension": "energy",
+                "help": "The current work function for constant workfunction simulations.",
+                "func": self.get_workfunction,
+            },
+            "workfunction_target": {
+                "dimension": "energy",
+                "help": "The target work function for constant workfunction simulations.",
+                "func": self.get_workfunction_target,
+            },
+            "Grand_canonical_potential": {
+                "dimension": "energy",
+                "help": "Grand canonical potential for constant potential simulations (E - mu/phi * net electrons).",
+                "func": self.get_grand_canonical_potential,
+            },
         }
 
     def bind(self, system):
@@ -2896,6 +2926,115 @@ class Properties:
         if self.nm.exchange_potential is None:
             raise Exception("No bosons found for fermionic_sign")
         return self.nm.exchange_potential.fermionic_sign
+
+    def get_electronic_charge(self):
+        """Returns the current electronic charge for constant potential simulations."""
+        if hasattr(self.motion, 'electronic_state') and self.motion.electronic_state is not None:
+            return self.motion.electronic_state.q
+        else:
+            return 0.0
+
+    def get_workfunction_target(self):
+        """Returns the target work function for constant workfunction simulations.
+
+        This reads the target value configured in the electronic state when
+        running in workfunction mode. The value is in internal units
+        (Hartree) and will be converted by the output layer.
+        """
+        if (
+            hasattr(self.motion, "electronic_state")
+            and self.motion.electronic_state is not None
+            and hasattr(self.motion.electronic_state, "target_workfunction")
+        ):
+            return self.motion.electronic_state.target_workfunction
+        else:
+            return 0.0
+
+    def get_fermi_level(self):
+        """Returns the current Fermi level for constant potential simulations."""
+        if hasattr(self.motion, 'electronic_state') and self.motion.electronic_state is not None:
+            return self.motion.electronic_state.current_ef
+        else:
+            return 0.0
+
+    def get_fermi_level_target(self):
+        """Returns the target Fermi level for constant potential simulations."""
+        if hasattr(self.motion, 'electronic_state') and self.motion.electronic_state is not None:
+            return self.motion.electronic_state.target_ef
+        else:
+            return 0.0
+    
+    def get_workfunction(self):
+        """Returns the current work function for constant workfunction simulations.
+
+        The value is returned in internal energy units (Hartree) and will be
+        converted to the requested user units (e.g. eV) by the output layer.
+        """
+        if (
+            hasattr(self.motion, "electronic_state")
+            and self.motion.electronic_state is not None
+            and hasattr(self.motion.electronic_state, "current_workfunction")
+        ):
+            return self.motion.electronic_state.current_workfunction
+        else:
+            return 0.0
+
+    def get_grand_canonical_potential(self):
+        """Returns the grand canonical potential for constant potential simulations.
+
+        For constant Fermi level simulations (mode='fermi'):
+
+            Omega = E_reg - mu * (N - N_neutral)
+
+        For constant workfunction simulations (mode='workfunction'):
+
+            Omega = E_reg - phi * (N - N_neutral)
+
+        where E_reg is the regular (canonical) system energy as returned by
+        the 'potential' property (already lambda-mixed by FFMixTwoSockets),
+        N is the current electronic charge q, and N_neutral is the neutral
+        electron count provided via neutral_electrons.
+        All energies are in internal units (Hartree).
+        """
+
+        # Base regular energy: same quantity used for the 'potential' property
+        try:
+            E_reg = self.get_pot()
+        except Exception:
+            # If potential cannot be obtained, fall back to zero
+            E_reg = 0.0
+
+        # If no electronic state is present, just return the regular energy
+        es = getattr(self.motion, "electronic_state", None)
+        if es is None:
+            return E_reg
+
+        # Current electron number q
+        N_current = getattr(es, "q", None)
+        if N_current is None:
+            return E_reg
+
+        # Neutral electron number: obtained from electronic_state.neutral_electrons
+        neutral_electrons = getattr(es, "neutral_electrons", None)
+        if neutral_electrons is None:
+            return E_reg
+
+        net_electrons = float(N_current) - float(neutral_electrons)
+        if abs(net_electrons) < 1e-12:
+            # No net excess charge: grand canonical potential reduces to canonical energy
+            return E_reg
+
+        mode = getattr(es, "mode", "fermi")
+        if mode == "workfunction":
+            X = getattr(es, "current_workfunction", None)
+        else:
+            X = getattr(es, "current_ef", None)
+
+        if X is None:
+            return E_reg
+
+        # Omega = E_reg - X * net_electrons (all in Hartree)
+        return E_reg - float(X) * net_electrons
 
 
 class Trajectories:
