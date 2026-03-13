@@ -1,131 +1,31 @@
-# i-PI: a Universal Force Engine
+# i-PI 3.1.5.1 — Constant-Potential Molecular Dynamics Framework
 
-A Python interface for ab initio path integral molecular dynamics simulations (and more).
-i-PI is a Python server (that does not need to be compiled and only requires a relatively
-recent version of Python and Numpy) that applies an algorithm to update the positions of
-the nuclei. One of many compatible external codes acts as client, and computes the
-electronic energy and forces.
+This project is an experimental development version based on i-PI 3.1.5.1, implementing a flexible and general constant-potential molecular dynamics framework.
+Related manuscript (preprint):
+https://chemrxiv.org/doi/full/10.26434/chemrxiv.15000187/v1
 
-This is typically a patched version of an electronic structure code, but a
-simple self-contained Fortran driver that implements several simple interatomic
-potentials is included for test purposes.
+## Main Idea
 
-i-PI was originally developed to simulate the quantum mechanical nature of light
-nuclei by performing path integral molecular dynamics simulations,
-and it implements most of the state-of-the-art methods to accelerate this kind of
-calculations. It has since grown to also provide all sorts of simulation
-strategies, from replica exchange to geometry optimization.
+The framework is built upon the distinctive server–client architecture of i-PI. Its central idea is to introduce an additional electronic degree of freedom and couple it to a target potential, such as the Fermi level or work function. The propagation of the electronic DOF, the potentiostat control, and the exchange of electronic information such as electron number and Fermi level/work function are all handled on the i-PI side. As a result, the method is not tied to a specific electronic-structure package, but can instead be interfaced with different DFT clients through minimal and non-intrusive modifications.
 
-If you use i-PI in your research, please cite the accompanying publication:
-for version 3, the relevant paper is
-[Litman et al., _J. Chem. Phys._ 161, 062504 (2024)](https://doi.org/10.1063/5.0215869)
+This design makes the framework both flexible and general. It is applicable not only to conventional constant-potential simulations based on implicit solvent, but also to a Ne-electrode (Ne counter-electrode) based constant-potential scheme, extending constant-potential simulations beyond the implicit-solvent setting.
 
-```
-@article{litman2024ipi,
-title={i-PI 3.0: a flexible and efficient framework for advanced atomistic simulations},
-author={Yair Litman and Venkat Kapil and Yotam M. Y. Feldman and Davide Tisi and Tomislav Begušić and Karen Fidanyan and Guillaume Fraux and Jacob Higer and Matthias Kellner and Tao E. Li and Eszter S. Pós and Elia Stocco and George Trenins and Barak Hirshberg and Mariana Rossi and Michele Ceriotti},
-journal = {J. Chem. Phys.},
-pages   = {062505},
-volume  = {161},
-year    = {2024}
-}
-```
+At the same time, the framework is compatible with two broad classes of electronic-structure backends.
+For DFT clients that support fractional electron numbers, constant-potential sampling can be performed directly.
+For DFT clients that are restricted to integer electron numbers, the framework employs a linear interpolation (two-endpoint mixing) strategy between two neighboring constant-charge states. By constructing an equivalent mixed-Hamiltonian description, this approach bypasses the integer-electron-number constraint and enables flexible constant-potential sampling.
 
-## Quick Setup
+More broadly, this linear-interpolation strategy provides a natural bridge between constant-charge and constant-potential simulations. Therefore, the framework is not only applicable to conventional DFT-based simulations, but also provides a natural route toward constant-potential machine-learning potentials.
 
-To use i-PI with an existing driver, install and update using `pip`:
+## Key Features
 
-Last version:
+Constant-potential framework built on top of i-PI by introducing an additional electronic degree of freedom.
 
-```bash
-python -m pip install git+https://github.com/i-pi/i-pi.git
-```
+General and portable implementation enabled by the i-PI server–client communication architecture, allowing coupling to multiple DFT clients with minimal modifications.
 
-Last Release:
+Two stochastic potentiostats (CSVR && Langevin) are provided. Compared with deterministic schemes (e.g., Nosé–Hoover), stochastic thermostats typically offer better dynamical properties and ergodicity for a single electronic DOF; in tests, the electronic number exhibits a well-behaved distribution.
 
-```bash
-pip install -U ipi
-```
+Supports both conventional implicit-solvent constant-potential simulations and a Ne-electrode-based constant-potential scheme.
 
-## Documentation 
+Establishes a bridge between constant-charge and constant-potential simulations through linear interpolation between two neighboring constant-charge endpoints, making the framework applicable to DFT clients subject to integer-electron-number constraints.
 
-You can find the online documentation at [https://docs.ipi-code.org](https://docs.ipi-code.org/). Alternatively, you can build it locally by following instructions in the `docs/README.md` file.
-
-## Source installation
-
-To develop i-PI or test it with the self-contained driver, follow these
-instructions. It is assumed that i-PI will
-be run from a Linux environment, with a recent version of Python, Numpy and
-gfortran, and that the terminal is initially in the i-pi package directory (the
-directory containing this file), which you can obtain by cloning the repository
-
-```bash
-git clone https://github.com/i-pi/i-pi.git
-```
-
-Source the environment settings file `env.sh` as `source env.sh` or `.
-env.sh`. It is useful to put this in your `.bashrc` or other settings file if
-you always want to have i-PI available.
-
-## Compile the driver code
-
-The built-in driver requires a FORTRAN compiler, and can be built as
-
-```bash
-cd drivers/f90
-make
-cd ../..
-```
-
-There is also a Python driver available in `drivers/py`, which however has limited
-functionalities.
-
-## Examples and demos
-
-The `examples` and `demos` folders contain inputs for many different types of
-calculations based on i-PI. Examples are typically minimal use-cases of specific
-features, while demos are more structured, tutorial-like examples that show how
-to realize more complex setups, and also provide a brief discussion of the
-underlying algorithms.
-
-To run these examples, you should typically start i-PI, redirecting the output to
-a log file, and then run a couple of instances of the driver code. The progress
-of the wrapper is followed by monitoring the log file with the `tail` Linux command.
-
-Optionally, you can make a copy of the directory with the example somewhere
-else if you want to keep the i-PI directory clean. For example, after sourcing the `env.sh` file, 
-
-```bash
-cd demos/para-h2-tutorial/tutorial-1/
-i-pi tutorial-1.xml > log &
-i-pi-driver -a localhost -p 31415 -m sg -o 15 &
-i-pi-driver -a localhost -p 31415 -m sg -o 15 &
-tail -f log
-```
-
-The monitoring can be interrupted with CTRL+C when the run has finished (5000 steps).
-
-## Tutorials and online resources
-
-The i-PI [documentation](https://docs.ipi-code.org/onlinereso.html) has a list of
-available tutorials, recipes and other useful online resources.
-
-## Run the automatic test suite
-
-The automatic test suite can be run by calling the i-pi-tests script.
-You need to have the `pytest` package installed
-
-```
-i-pi-tests
-```
-
-You may also need to install some dependencies, listed in `requirements.txt`.
-
-See more details in the README file inside the `ipi_tests` folder.
-
-## Contributing
-
-If you have new features you want to implement into i-PI, your contributions are much welcome.
-See `CONTRIBUTING.md` for a brief set of style guidelines and best practices. Before embarking
-into a substantial project, it might be good to get in touch with the developers, e.g. by opening
-a wishlist issue.
+Naturally extendable to constant-potential machine-learning potentials.
