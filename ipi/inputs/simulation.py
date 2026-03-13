@@ -294,6 +294,14 @@ frequency in your simulation to make i-PI faster. Use at your own risk!
                     _iobj = iforcefields.InputFFCavPhSocket()
                     _iobj.store(_obj)
                     self.extra[_ii] = ("ffcavphsocket", _iobj)
+                elif isinstance(_obj, eforcefields.FFMixTwoSockets):
+                    # Store mixed two-endpoint CP2K backends via the unified
+                    # <ffsocket> tag using InputFFSocket with charge='true'
+                    # and mixing='true', so that restart files do not rely on
+                    # the legacy <ffmixtwosockets> element.
+                    _iobj = iforcefields.InputFFSocket()
+                    _iobj.store(_obj)
+                    self.extra[_ii] = ("ffsocket", _iobj)
                 elif isinstance(_obj, System):
                     _iobj = InputSystem()
                     _iobj.store(_obj)
@@ -353,8 +361,13 @@ frequency in your simulation to make i-PI faster. Use at your own risk!
             ]:
                 new_ff = v.fetch()
                 if k == "ffsocket":
-                    # overrides ffsocket prefix
-                    new_ff.socket.sockets_prefix = self.sockets_prefix.fetch()
+                    # overrides ffsocket prefix when the forcefield exposes a
+                    # low-level socket interface (e.g. plain FFSocket). Some
+                    # backends created via <ffsocket> (such as FFMixTwoSockets)
+                    # do not have a .socket attribute and manage their own
+                    # socket layer, so we skip prefix assignment in that case.
+                    if hasattr(new_ff, "socket"):
+                        new_ff.socket.sockets_prefix = self.sockets_prefix.fetch()
                 fflist.append(new_ff)
 
         # this creates a simulation object which gathers all the little bits

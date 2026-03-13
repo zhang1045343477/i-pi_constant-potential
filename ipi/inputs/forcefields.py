@@ -7,6 +7,7 @@
 
 from copy import copy
 import numpy as np
+import os
 
 from ipi.engine.forcefields import (
     ForceField,
@@ -21,13 +22,14 @@ from ipi.engine.forcefields import (
     FFdmd,
     FFCavPhSocket,
     FFRotations,
+    FFMixTwoSockets,
 )
 from ipi.interfaces.sockets import InterfaceSocket
 from ipi.pes import __drivers__
 import ipi.engine.initializer
 from ipi.inputs.initializer import *
 from ipi.utils.inputvalue import *
-from ipi.utils.messages import verbosity, warning
+from ipi.utils.messages import verbosity, warning, info
 from ipi.utils.prng import Random
 from ipi.inputs.prng import InputRandom
 
@@ -222,26 +224,146 @@ class InputFFSocket(InputForceField):
                 "help": "This gives the number of seconds before assuming a calculation has died. If 0 there is no timeout.",
             },
         ),
+        # Optional CP2K two-endpoint mixing configuration, only used when
+        # charge='true' and mixing='true' to drive FFMixTwoSockets via
+        # the unified <ffsocket> tag.
+        "client_template": (
+            InputValue,
+            {
+                "dtype": str,
+                "default": "",
+                "help": "CP2K input template with placeholders {{CHARGE}}, {{HOST}}, {{PORT}}. Required when using <ffsocket charge='true' mixing='true'>.",
+            },
+        ),
+        "client_exe": (
+            InputValue,
+            {
+                "dtype": str,
+                "default": "/usr/local/bin/cp2k.psmp",
+                "help": "Path to CP2K executable used for two-endpoint mixing.",
+            },
+        ),
+        "client_env": (
+            InputValue,
+            {
+                "dtype": str,
+                "default": "",
+                "help": "Optional shell commands to set up the CP2K environment before launching (e.g. source toolchain script).",
+            },
+        ),
+        "client_run_cmd": (
+            InputValue,
+            {
+                "dtype": str,
+                # NOTE: This is only required when using CP2K two-endpoint mixing
+                # via <ffsocket charge='true' mixing='true'>. For plain socket
+                # forcefields (e.g. VASP constant potential with mixing='false')
+                # it should remain optional, so we provide an empty-string default
+                # here and enforce non-emptiness only in check() when mixing is on.
+                "default": "",
+                "help": "Full launcher command prefix used to run CP2K (e.g. 'mpirun -np 32' or 'srun --exclusive -N4 -n256').",
+            },
+        ),
+        "client1_run_cmd": (
+            InputValue,
+            {
+                "dtype": str,
+                "default": "",
+                "help": "Launcher command prefix for the first CP2K endpoint. Overrides client_run_cmd when non-empty.",
+            },
+        ),
+        "client2_run_cmd": (
+            InputValue,
+            {
+                "dtype": str,
+                "default": "",
+                "help": "Launcher command prefix for the second CP2K endpoint. Overrides client_run_cmd when non-empty.",
+            },
+        ),
+        "switch_threshold": (
+            InputValue,
+            {
+                "dtype": float,
+                "default": 0.05,
+                "help": "Hysteresis threshold ε for automatic thermal switching. Switch occurs when λ < ε or λ > 1-ε.",
+            },
+        ),
+        "auto_switch": (
+            InputValue,
+            {
+                "dtype": bool,
+                "default": True,
+                "help": "Enable automatic thermal switching when λ values go outside comfortable ranges.",
+            },
+        ),
+        "host": (
+            InputValue,
+            {
+                "dtype": str,
+                "default": "localhost",
+                "help": "Host for socket communication with CP2K endpoints.",
+            },
+        ),
+        "port_base": (
+            InputValue,
+            {
+                "dtype": int,
+                "default": 12345,
+                "help": "Base port number for CP2K endpoints. Endpoint 1 uses port_base, endpoint 2 uses port_base+1.",
+            },
+        ),
     }
     attribs = {
         "mode": (
-            InputAttribute,
-            {
-                "dtype": str,
-                "options": ["unix", "inet"],
-                "default": "inet",
-                "help": "Specifies whether the driver interface will listen onto a internet socket [inet] or onto a unix socket [unix].",
-            },
-        ),
+			InputAttribute,
+			{
+				"dtype": str,
+				"options": ["unix", "inet"],
+				"default": "inet",
+				"help": "Specifies whether the driver interface will listen onto a internet socket [inet] or onto a unix socket [unix].",
+			},
+		),
         "matching": (
-            InputAttribute,
-            {
-                "dtype": str,
-                "options": ["auto", "any", "lock"],
-                "default": "auto",
-                "help": "Specifies whether requests should be dispatched to any client, automatically matched to the same client when possible [auto] or strictly forced to match with the same client [lock].",
-            },
-        ),
+			InputAttribute,
+			{
+				"dtype": str,
+				"options": ["auto", "any", "lock"],
+				"default": "auto",
+				"help": "Specifies whether requests should be dispatched to any client, automatically matched to the same client when possible [auto] or strictly forced to match with the same client [lock].",
+			},
+		),
+        "charge": (
+			InputAttribute,
+			{
+				"dtype": bool,
+				"default": False,
+				"help": "Enable electronic charge coupling / constant-potential extensions when set to true.",
+			},
+		),
+        "mixing": (
+			InputAttribute,
+			{
+				"dtype": bool,
+				"default": False,
+				"help": "Enable two-endpoint mixing backend when used together with charge='true'.",
+			},
+		),
+        "Ne_doping": (
+			InputAttribute,
+			{
+				"dtype": bool,
+				"default": False,
+				"help": "Enable Ne doping mode for VASP constant-potential runs. Only valid when charge='true' and mixing='false'.",
+			},
+		),
+        "client": (
+			InputAttribute,
+			{
+				"dtype": str,
+				"default": "",
+				"help": "Select backend implementation for Ne_doping constant-potential mode (vasp or cp2k). Must be set explicitly when Ne_doping='true'.",
+			},
+		),
     }
 
     attribs.update(InputForceField.attribs)
@@ -260,14 +382,77 @@ class InputFFSocket(InputForceField):
     default_help = "Deals with the assigning of force calculation jobs to different driver codes, and collecting the data, using a socket for the data communication."
     default_label = "FFSOCKET"
 
+    def __init__(self, *args, **kwargs):
+        """Initialise InputFFSocket.
+
+        The 'client' attribute is treated as optional at the XML level and is
+        only required when Ne_doping='true'. We therefore override the default
+        mandatory behaviour for attributes without an explicit default and mark
+        'client' as optional in the generic Input machinery.
+        """
+
+        super(InputFFSocket, self).__init__(*args, **kwargs)
+
+        # Mark 'client' as optional so that <ffsocket> tags without a client
+        # attribute remain valid when Ne_doping='false'. Whether 'client' must
+        # be present is then enforced in check() based on the Ne_doping flag.
+        if hasattr(self, "client"):
+            self.client._optional = True
+
     def store(self, ff):
         """Takes a ForceField instance and stores a minimal representation of it.
 
         Args:
-           ff: A ForceField object with a FFSocket forcemodel object.
+           ff: A ForceField object. Can be a plain FFSocket/FFCavPhSocket or
+               an FFMixTwoSockets instance created via <ffsocket> when
+               charge='true' and mixing='true'.
         """
 
-        if type(ff) not in [FFSocket, FFCavPhSocket]:
+        # Special handling for two-endpoint CP2K mixing backends. These do not
+        # expose a low-level .socket attribute, but are still configured via
+        # the unified <ffsocket> tag using client_* fields.
+        if isinstance(ff, FFMixTwoSockets):
+            # Store common forcefield attributes (name, latency, offset, etc.).
+            super(InputFFSocket, self).store(ff)
+
+            # For the outer <ffsocket> wrapper we store reasonable defaults for
+            # the low-level socket fields even though they are not used by
+            # FFMixTwoSockets itself.
+            self.address.store(getattr(ff, "host", "localhost"))
+            # Use the CP2K endpoint base port as a human-readable hint; this is
+            # ignored on read when mixing is enabled.
+            self.port.store(getattr(ff, "port_base", 65535))
+            self.timeout.store(0.0)
+            self.slots.store(1)
+            self.mode.store("inet")
+            self.matching.store("auto")
+            self.exit_on_disconnect.store(False)
+            self.threaded.store(True)
+
+            # Encode that this backend corresponds to the mixing path.
+            self.charge.store(True)
+            self.mixing.store(True)
+
+            # Store CP2K two-endpoint mixing configuration using the
+            # client_* field names expected by <ffsocket>.
+            self.switch_threshold.store(ff.switch_threshold)
+            self.auto_switch.store(ff.auto_switch)
+
+            # Prefer the original template path if available so that restart
+            # files do not embed the full template content.
+            template_path = getattr(ff, "cp2k_template_path", None) or ff.cp2k_template
+            self.client_template.store(template_path)
+            self.client_exe.store(ff.cp2k_exe)
+            self.client_env.store(getattr(ff, "cp2k_env", ""))
+            self.client_run_cmd.store(getattr(ff, "cp2k_run_cmd", ""))
+            self.host.store(ff.host)
+            self.port_base.store(ff.port_base)
+
+            return
+
+        # Default path: plain socket forcefields such as FFSocket and
+        # FFCavPhSocket (e.g. FFCPVasp).
+        if not isinstance(ff, (FFSocket, FFCavPhSocket)):
             raise TypeError(
                 "The type " + type(ff).__name__ + " is not a valid socket forcefield"
             )
@@ -282,6 +467,19 @@ class InputFFSocket(InputForceField):
         self.matching.store(ff.socket.match_mode)
         self.exit_on_disconnect.store(ff.socket.exit_on_disconnect)
         self.threaded.store(True)  # hard-coded
+        # Store optional charge/mixing/Ne_doping flags when present; default to False otherwise.
+        if hasattr(ff, "charge_enabled"):
+            self.charge.store(bool(ff.charge_enabled))
+        else:
+            self.charge.store(False)
+        if hasattr(ff, "mixing_enabled"):
+            self.mixing.store(bool(ff.mixing_enabled))
+        else:
+            self.mixing.store(False)
+        if hasattr(ff, "Ne_doping"):
+            self.Ne_doping.store(bool(ff.Ne_doping))
+        else:
+            self.Ne_doping.store(False)
 
     def fetch(self):
         """Creates a ForceSocket object.
@@ -302,6 +500,100 @@ class InputFFSocket(InputForceField):
             )
             self.exit_on_disconnect.store(True)
 
+        # Interpret charge / mixing attributes.
+        charge_flag = bool(self.charge.fetch())
+        mixing_flag = bool(self.mixing.fetch())
+        ne_doping_flag = bool(self.Ne_doping.fetch())
+
+        if mixing_flag and not charge_flag:
+            raise ValueError("FFSocket with mixing='true' requires charge='true'.")
+
+        if ne_doping_flag and mixing_flag:
+            raise ValueError("FFSocket with Ne_doping='true' is only supported for single-endpoint runs (mixing='false').")
+
+        if ne_doping_flag and not charge_flag:
+            raise ValueError("FFSocket with Ne_doping='true' requires charge='true' and mixing='false'.")
+
+        # When charge='true' and mixing='true', drive the existing CP2K
+        # two-endpoint mixing backend (FFMixTwoSockets) via the unified
+        # <ffsocket> tag instead of requiring a separate <ffmixtwosockets>
+        # element.
+        if mixing_flag and charge_flag:
+            if self.threaded.fetch() is False:
+                raise ValueError(
+                    "FFSocket with mixing='true' requires threaded='true' for CP2K two-endpoint mixing."
+                )
+
+            # Read CP2K template from file if client_template points to a path.
+            template_path = self.client_template.fetch()
+            if not template_path:
+                raise ValueError(
+                    "client_template must be provided when using <ffsocket charge='true' mixing='true'> "
+                    "to drive CP2K two-endpoint mixing."
+                )
+
+            if os.path.exists(template_path):
+                try:
+                    with open(template_path, "r") as f:
+                        template_content = f.read()
+                    info(
+                        f" @InputFFSocket: Read CP2K template from file: {template_path}",
+                        verbosity.debug,
+                    )
+                except Exception as e:
+                    warning(
+                        f" @InputFFSocket: Could not read template file {template_path}: {e}",
+                        verbosity.medium,
+                    )
+                    template_content = template_path
+            else:
+                # Treat as direct template content
+                template_content = template_path
+
+            launcher_common = self.client_run_cmd.fetch()
+            launcher1 = self.client1_run_cmd.fetch()
+            launcher2 = self.client2_run_cmd.fetch()
+
+            return FFMixTwoSockets(
+                latency=self.latency.fetch(),
+                offset=self.offset.fetch(),
+                name=self.name.fetch(),
+                pars=self.parameters.fetch(),
+                dopbc=self.pbc.fetch(),
+                active=self.activelist.fetch(),
+                threaded=self.threaded.fetch(),
+                switch_threshold=self.switch_threshold.fetch(),
+                cp2k_template=template_content,
+                cp2k_template_path=template_path,
+                cp2k_exe=self.client_exe.fetch(),
+                auto_switch=self.auto_switch.fetch(),
+                host=self.host.fetch(),
+                port_base=self.port_base.fetch(),
+                cp2k_env=self.client_env.fetch(),
+                cp2k_run_cmd=launcher_common,
+                cp2k_run_cmd1=launcher1,
+                cp2k_run_cmd2=launcher2,
+            )
+
+        # Default path: plain socket forcefield (with optional single-endpoint
+        # charge coupling for VASP/CP2K-style constant potential when
+        # charge_enabled=True and mixing_enabled=False).
+
+        # The 'client' attribute is primarily used to select the backend
+        # implementation in Ne_doping mode (e.g. 'vasp' or 'cp2k'), but it is
+        # also reused by plain FFSocket to enable backend-specific behaviour
+        # such as the VASP workfunction path. We therefore always fetch the
+        # attribute, but only enforce non-emptiness when Ne_doping is enabled.
+        if ne_doping_flag:
+            client_backend = self.client.fetch()
+            if not client_backend:
+                raise ValueError(
+                    "FFSocket with Ne_doping='true' requires a non-empty 'client' "
+                    "attribute selecting the backend implementation (e.g. 'vasp' or 'cp2k')."
+                )
+        else:
+            client_backend = self.client.fetch()
+
         return FFSocket(
             pars=self.parameters.fetch(),
             name=self.name.fetch(),
@@ -319,6 +611,10 @@ class InputFFSocket(InputForceField):
                 match_mode=self.matching.fetch(),
                 exit_on_disconnect=self.exit_on_disconnect.fetch(),
             ),
+            charge_enabled=charge_flag,
+            mixing_enabled=False,
+            Ne_doping=ne_doping_flag,
+            client=client_backend,
         )
 
     def check(self):
@@ -344,6 +640,67 @@ class InputFFSocket(InputForceField):
         if self.timeout.fetch() < 0.0:
             raise ValueError("Negative timeout parameter specified.")
 
+        # Additional validation for CP2K two-endpoint mixing when using
+        # <ffsocket charge='true' mixing='true'>.
+        charge_flag = bool(self.charge.fetch())
+        mixing_flag = bool(self.mixing.fetch())
+        ne_doping_flag = bool(self.Ne_doping.fetch())
+
+        if ne_doping_flag and (not charge_flag or mixing_flag):
+            raise ValueError(
+                "Ne_doping='true' requires charge='true' and mixing='false' on <ffsocket>."
+            )
+
+        client_explicit = getattr(self.client, "_explicit", False)
+
+        # When Ne_doping is enabled we require the user to select a backend
+        # explicitly via the 'client' attribute.
+        if ne_doping_flag and (not client_explicit):
+            raise ValueError(
+                "Ne_doping='true' requires the 'client' attribute to be set to 'vasp' or 'cp2k' on <ffsocket>."
+            )
+
+        # When Ne_doping is disabled the presence of a 'client' attribute is
+        # considered an input error, as it would otherwise be ambiguous.
+        if (not ne_doping_flag) and client_explicit:
+            raise ValueError(
+                "The 'client' attribute is only valid when Ne_doping='true' on <ffsocket>."
+            )
+
+        if mixing_flag and charge_flag:
+            port_base = self.port_base.fetch()
+            if port_base < 1 or port_base > 65533:
+                raise ValueError(
+                    f"Port base ({port_base}) must be in range [1, 65533] to allow for endpoint ports."
+                )
+
+            threshold = self.switch_threshold.fetch()
+            if threshold <= 0.0 or threshold >= 0.5:
+                raise ValueError(
+                    f"Switch threshold ({threshold}) must be in range (0, 0.5)."
+                )
+
+            if not self.client_template.fetch():
+                raise ValueError(
+                    "client_template must be provided. Dummy endpoints are no longer supported "
+                    "when using CP2K two-endpoint mixing."
+                )
+
+            launcher_common = self.client_run_cmd.fetch()
+            launcher1 = self.client1_run_cmd.fetch()
+            launcher2 = self.client2_run_cmd.fetch()
+
+            def _is_non_empty(val):
+                return bool(val) and bool(str(val).strip())
+
+            effective1 = launcher1 if _is_non_empty(launcher1) else launcher_common
+            effective2 = launcher2 if _is_non_empty(launcher2) else launcher_common
+
+            if not _is_non_empty(effective1) or not _is_non_empty(effective2):
+                raise ValueError(
+                    "At least one launcher command must be provided for each CP2K endpoint when using CP2K two-endpoint mixing (client_run_cmd, client1_run_cmd, client2_run_cmd)."
+                )
+
 
 class InputFFDirect(InputForceField):
     fields = {
@@ -352,28 +709,8 @@ class InputFFDirect(InputForceField):
             {
                 "dtype": str,
                 "default": "dummy",
-                "options": list(__drivers__.keys()) + ["custom"],
+                "options": list(__drivers__.keys()),
                 "help": "Type of PES that should be used to evaluate the forcefield",
-            },
-        ),
-        "pes_path": (
-            InputValue,
-            {
-                "dtype": str,
-                "default": "",
-                "help": "File path for 'custom' client (it should end with .py)",
-            },
-        ),
-        "batch_size": (
-            InputValue,
-            {
-                "dtype": int,
-                "default": 1,
-                "help": (
-                    "The number of structures that should be batched in a single evaluation."
-                    + " The total number of structures computed at each step should be a multiple "
-                    + "of `batch_size` or the calculation will hang forever."
-                ),
             },
         ),
     }
@@ -393,8 +730,6 @@ class InputFFDirect(InputForceField):
     def store(self, ff):
         super().store(ff)
         self.pes.store(ff.pes)
-        self.pes_path.store(ff.pes_path)
-        self.batch_size.store(ff.batch_size)
 
     def fetch(self):
         super().fetch()
@@ -407,8 +742,6 @@ class InputFFDirect(InputForceField):
             dopbc=self.pbc.fetch(),
             threaded=self.threaded.fetch(),
             pes=self.pes.fetch(),
-            pes_path=self.pes_path.fetch(),
-            batch_size=self.batch_size.fetch(),
         )
 
 
@@ -1204,3 +1537,4 @@ class InputFFCavPhSocket(InputFFSocket):
             omega_c=self.omega_c.fetch(),
             ph_rep=self.ph_rep.fetch(),
         )
+
