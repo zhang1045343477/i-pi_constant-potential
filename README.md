@@ -29,3 +29,15 @@ Supports both conventional implicit-solvent constant-potential simulations and a
 Establishes a bridge between constant-charge and constant-potential simulations through linear interpolation between two neighboring constant-charge endpoints, making the framework applicable to DFT clients subject to integer-electron-number constraints.
 
 Naturally extendable to constant-potential machine-learning potentials.
+
+## Usage
+
+To use this version of i-PI, the external electronic-structure clients must first be patched accordingly. The current implementation relies on the patches provided in examples/clients/vasp and examples/clients/cp2k. Therefore, before running simulations, the corresponding VASP or CP2K client needs to be recompiled and reinstalled with these patches applied.
+
+Once the patched clients are installed, this framework can be used in essentially the same way as standard i-PI. Users can prepare the i-PI input files as usual, launch the i-PI server, and connect the patched client to perform constant-potential molecular dynamics simulations.
+
+Example input files can be found in:
+
+examples/constant-potential/
+
+These examples provide typical setups for constant-potential simulations and can serve as starting points for practical calculations.
