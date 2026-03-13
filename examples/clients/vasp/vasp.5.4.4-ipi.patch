@@ -1,0 +1,862 @@
+diff -rupN src/base.F /home/zhangchenyu/work2/20260310-xiugai/vasp/vasp.5.4.4/src/base.F
+--- src/base.F	2017-04-20 17:03:55.000000000 +0800
++++ /home/zhangchenyu/work2/20260310-xiugai/vasp/vasp.5.4.4/src/base.F	2026-03-11 20:47:41.053568753 +0800
+@@ -114,6 +114,7 @@
+         LOGICAL LCHARG               ! write CHGCAR
+         LOGICAL LVTOT                ! write total local potential to LOCPOT
+         LOGICAL LVHAR                ! write Hartree potential to LOCPOT
++        LOGICAL LSOL_WRITE           ! write vaspsol auxiliary grid files (SVDW, VSOLV, ...)
+         LOGICAL LPDENS               ! write partial density (charge density for one band)
+         INTEGER LORBIT               ! write orbit/dos
+         LOGICAL LELF                 ! write elf
+diff -rupN src/fileio.F /home/zhangchenyu/work2/20260310-xiugai/vasp/vasp.5.4.4/src/fileio.F
+--- src/fileio.F	2017-04-20 17:03:57.000000000 +0800
++++ /home/zhangchenyu/work2/20260310-xiugai/vasp/vasp.5.4.4/src/fileio.F	2026-03-11 20:47:41.076568752 +0800
+@@ -1887,6 +1887,127 @@
+       END SUBROUTINE
+ 
+ 
++!*************************SUBROUTINE OUTPOT_Z **************************
++!   write planar-averaged potential along z to a specified unit
++!   This is used in IBRION=24 i-PI driver mode to produce a compact
++!   LOCPOT_Z file from the real-space potential CVTOT without writing
++!   the full 3D LOCPOT.
++!***********************************************************************
++
++      SUBROUTINE OUTPOT_Z(GRIDC, LATT_CUR, IU, CVTOT)
++      USE prec
++      USE mgrid
++      USE lattice
++      IMPLICIT REAL(q) (A-H,O-Z)
++
++      TYPE (grid_3d) GRIDC
++      TYPE (latt)    LATT_CUR
++      RGRID CVTOT(GRIDC%RL%NP)
++! local variables
++      INTEGER :: NZ, NALLOC, N
++      REAL(q), ALLOCATABLE :: WORK(:)
++      REAL(q) :: SUMPLANE, AVGVAL
++      REAL(q) :: LZ, DZ, ZPOS
++      INTEGER :: ISTAT
++
++      NALLOC = GRIDC%NGX*GRIDC%NGY
++      ALLOCATE(WORK(NALLOC), STAT=ISTAT)
++      IF (ISTAT>0) RETURN
++
++!     length of third lattice vector (Angstrom)
++      LZ = SQRT( LATT_CUR%A(1,3)*LATT_CUR%A(1,3) &
++     &         + LATT_CUR%A(2,3)*LATT_CUR%A(2,3) &
++     &         + LATT_CUR%A(3,3)*LATT_CUR%A(3,3) )
++
++      IF (GRIDC%NGZ.GT.1) THEN
++         DZ = LZ / REAL(GRIDC%NGZ-1, q)
++      ELSE
++         DZ = 0._q
++      ENDIF
++
++      WRITE(IU,'(A)') '# z(Angstrom)  V_avg(eV)'
++
++      DO NZ = 1, GRIDC%NGZ
++         CALL MRG_GRID_RL_PLANE(GRIDC, WORK, CVTOT, NZ)
++         SUMPLANE = 0._q
++         DO N = 1, NALLOC
++            SUMPLANE = SUMPLANE + WORK(N)
++         ENDDO
++         AVGVAL = SUMPLANE / REAL(NALLOC, q)
++         ZPOS   = REAL(NZ-1, q) * DZ
++         WRITE(IU,'(2E20.12)') ZPOS, AVGVAL
++      ENDDO
++
++      DEALLOCATE(WORK)
++
++      RETURN
++      END SUBROUTINE
++
++
++
++      SUBROUTINE VACUUM_LEVEL_FROM_CVTOT(GRIDC, LATT_CUR, CVTOT, Z_MIN_A, Z_MAX_A, VAC_LEVEL_EV)
++      USE prec
++      USE mgrid
++      USE lattice
++      IMPLICIT REAL(q) (A-H,O-Z)
++
++      TYPE (grid_3d) GRIDC
++      TYPE (latt)    LATT_CUR
++      RGRID CVTOT(GRIDC%RL%NP)
++      REAL(q) :: Z_MIN_A, Z_MAX_A
++      REAL(q) :: VAC_LEVEL_EV
++      INTEGER :: NZ, NALLOC, N
++      REAL(q), ALLOCATABLE :: WORK(:)
++      REAL(q) :: SUMPLANE, AVGVAL
++      REAL(q) :: LZ, DZ, ZPOS
++      REAL(q) :: SUM_IN_REGION
++      INTEGER :: N_IN, ISTAT
++
++      NALLOC = GRIDC%NGX*GRIDC%NGY
++      ALLOCATE(WORK(NALLOC), STAT=ISTAT)
++      IF (ISTAT>0) THEN
++         VAC_LEVEL_EV = 0._q
++         RETURN
++      ENDIF
++
++      LZ = SQRT( LATT_CUR%A(1,3)*LATT_CUR%A(1,3) &
++     &         + LATT_CUR%A(2,3)*LATT_CUR%A(2,3) &
++     &         + LATT_CUR%A(3,3)*LATT_CUR%A(3,3) )
++
++      IF (GRIDC%NGZ.GT.1) THEN
++         DZ = LZ / REAL(GRIDC%NGZ-1, q)
++      ELSE
++         DZ = 0._q
++      ENDIF
++
++      SUM_IN_REGION = 0._q
++      N_IN = 0
++
++      DO NZ = 1, GRIDC%NGZ
++         CALL MRG_GRID_RL_PLANE(GRIDC, WORK, CVTOT, NZ)
++         SUMPLANE = 0._q
++         DO N = 1, NALLOC
++            SUMPLANE = SUMPLANE + WORK(N)
++         ENDDO
++         AVGVAL = SUMPLANE / REAL(NALLOC, q)
++         ZPOS   = REAL(NZ-1, q) * DZ
++         IF (ZPOS.GE.Z_MIN_A .AND. ZPOS.LE.Z_MAX_A) THEN
++            SUM_IN_REGION = SUM_IN_REGION + AVGVAL
++            N_IN = N_IN + 1
++         ENDIF
++      ENDDO
++
++      IF (N_IN>0) THEN
++         VAC_LEVEL_EV = SUM_IN_REGION / REAL(N_IN, q)
++      ELSE
++         VAC_LEVEL_EV = 0._q
++      ENDIF
++
++      DEALLOCATE(WORK)
++
++      RETURN
++      END SUBROUTINE
++
+ 
+ !***********************************************************************
+ !  write out initial header for PCDAT
+diff -rupN src/main.F /home/zhangchenyu/work2/20260310-xiugai/vasp/vasp.5.4.4/src/main.F
+--- src/main.F	2026-03-11 20:30:42.366629472 +0800
++++ /home/zhangchenyu/work2/20260310-xiugai/vasp/vasp.5.4.4/src/main.F	2026-03-13 11:24:59.533281413 +0800
+@@ -274,6 +274,43 @@
+       REAL(q) :: CELL_H(9), CELL_IH(9), VIRIAL(9)
+       ! unit conversion
+       REAL(q) :: EVTOHA, FOCTOAU
++      ! ipi driver state for IBRION=24 (constant potential)
++      LOGICAL :: INIT_DONE_24
++      INTEGER :: INITLEN
++      CHARACTER(LEN=4096) :: INITSTR
++      INTEGER :: INIT_RID
++      INTEGER :: EXTRALEN
++      CHARACTER(LEN=256) :: EXTRAJSON
++      REAL(q) :: Z_AVG_MIN_A, Z_AVG_MAX_A
++      REAL(q) :: VAC_LEVEL_EV, WORKFUNCTION_EV
++
++      ! Per-step implicit-solvent / workfunction control for IBRION=24.
++      ! The CHGDATA lightweight message from i-PI carries an integer flag
++      ! IPI_SOLV_FLAG (after NELECT/ZVAL) that is interpreted as a logical
++      ! IPI_SOLV_ENABLE.
++      ! When IPI_SOLV_ENABLE is .TRUE., we update the cached quantities
++      ! IPI_FERMI_EV, IPI_NELECT, IPI_VAC_LEVEL_EV and IPI_WORKFUNCTION_EV
++      ! after each SCF step. When it is .FALSE., we leave these caches
++      ! unchanged so that the JSON extras returned to i-PI expose the last
++      ! "active" values seen when the flag was 1.
++      INTEGER :: IPI_SOLV_FLAG
++      LOGICAL :: IPI_SOLV_ENABLE
++      REAL(q) :: IPI_FERMI_EV, IPI_NELECT
++      REAL(q) :: IPI_VAC_LEVEL_EV, IPI_WORKFUNCTION_EV
++
++      ! Ne-doping state for IBRION=24 constant-potential i-PI driver.
++      ! When enabled, the CHGDATA payload is interpreted as the Ne
++      ! valence ZVAL (zval_ne) instead of the total NELECT. The
++      ! reference neutral electron count and Ne atom count are used to
++      ! reconstruct NELECT internally as:
++      !   NELECT = neutral_electrons_ref + N_ne * (zval_ne - 8.0)
++      LOGICAL :: NE_DOPING_MODE
++      REAL(q) :: NEUTRAL_ELECTRONS_REF
++      REAL(q) :: ZVAL_NE_CURRENT
++      INTEGER :: NE_SPECIES_TYPE
++      INTEGER :: N_NE_ATOMS
++
++      LOGICAL :: LCOR_DIP_SAVE
+ 
+ !=======================================================================
+ !  begin array dimensions ...
+@@ -340,9 +377,11 @@
+       INTEGER NTYP_PP      ! number of types on POTCAR file
+ 
+       INTEGER I,J,N,NT,K
++      INTEGER NE_DOPING_FLAG
+ !---- used for creation of param.inc
+       REAL(q)    WFACT,PSRMX,PSDMX
+       REAL(q)    XCUTOF,YCUTOF,ZCUTOF
++      REAL(q)    NELECT_FROM_DOP, DELTA_NELECT
+ 
+ !---- timing information
+       INTEGER IERR
+@@ -414,6 +453,26 @@
+       EVTOHA = 1_q/(2_q*RYTOEV)
+       FOCTOAU = AUTOA*EVTOHA
+       HASDATA = .FALSE.
++      INIT_DONE_24 = .FALSE.
++      NE_DOPING_MODE = .FALSE.
++      NEUTRAL_ELECTRONS_REF = 0._q
++      ZVAL_NE_CURRENT = 0._q
++      NE_SPECIES_TYPE = 0
++      N_NE_ATOMS = 0
++      Z_AVG_MIN_A = 0._q
++      Z_AVG_MAX_A = 0._q
++      VAC_LEVEL_EV = 0._q
++      WORKFUNCTION_EV = 0._q
++
++      ! Default implicit-solvent control: if i-PI does not send the solvation
++      ! flag (or disables it), fall back to always enabling solvation and
++      ! updating the cached quantities every step.
++      IPI_SOLV_FLAG    = 1
++      IPI_SOLV_ENABLE  = .TRUE.
++      IPI_FERMI_EV     = 0._q
++      IPI_NELECT       = 0._q
++      IPI_VAC_LEVEL_EV = 0._q
++      IPI_WORKFUNCTION_EV = 0._q
+ 
+ #ifdef libbeef
+       LBEEFCALCBASIS = .FALSE.
+@@ -581,14 +640,14 @@
+           DYN%IBRION,INFO%ICHARG,INFO%INIWAV,INFO%NELM,INFO%NELMALL,INFO%NELMIN,INFO%NELMDL,INFO%EDIFF,DYN%EDIFFG, &
+           DYN%NSW,DYN%ISIF,PRED%IWAVPR,SYMM%ISYM,DYN%NBLOCK,DYN%KBLOCK,INFO%ENMAX,DYN%POTIM,DYN%TEBEG, &
+           DYN%TEEND,DYN%NFREE, &
+-          PACO%NPACO,PACO%APACO,T_INFO%NTYP,NTYPD,DYN%SMASS,SCALEE,T_INFO%POMASS, & 
++          PACO%NPACO,PACO%APACO,T_INFO%NTYP,NTYPD,DYN%SMASS,SCALEE,T_INFO%POMASS, &
+           T_INFO%DARWIN_V,T_INFO%DARWIN_R,T_INFO%VCA,LVCADER, &
+-          T_INFO%RWIGS,INFO%NELECT,INFO%NUP_DOWN,INFO%TIME, & 
+-          KPOINTS%EMIN,KPOINTS%EMAX,KPOINTS%EFERMI,KPOINTS%ISMEAR,KPOINTS%SPACING,KPOINTS%LGAMMA, & 
++          T_INFO%RWIGS,INFO%NELECT,INFO%NUP_DOWN,INFO%TIME, &
++          KPOINTS%EMIN,KPOINTS%EMAX,KPOINTS%EFERMI,KPOINTS%ISMEAR,KPOINTS%SPACING,KPOINTS%LGAMMA, &
+           DYN%PSTRESS,INFO%NDAV, &
+           KPOINTS%SIGMA,KPOINTS%LTET,INFO%WEIMIN,INFO%EBREAK,INFO%DEPER,IO%NWRITE,INFO%LCORR, &
+           IO%IDIOT,T_INFO%NIONS,T_INFO%NTYPP,IO%LMUSIC,IO%LOPTICS,STM, &
+-          INFO%ISPIN,T_INFO%ATOMOM,NIOND,IO%LWAVE,IO%LDOWNSAMPLE,IO%LCHARG,IO%LVTOT,IO%LVHAR,INFO%SZPREC, &
++          INFO%ISPIN,T_INFO%ATOMOM,NIOND,IO%LWAVE,IO%LDOWNSAMPLE,IO%LCHARG,IO%LVTOT,IO%LVHAR,IO%LSOL_WRITE,INFO%SZPREC, &
+           INFO%ENAUG,IO%LORBIT,IO%LELF,T_INFO%ROPT,INFO%ENINI, &
+           NGX,NGY,NGZ,NGXC,NGYC,NGZC,NBANDS,NEDOS,NBLK,LATT_CUR, &
+           LPLANE_WISE,LCOMPAT,LMAX_CALC,SET_LMAX_MIX_TO,WDES%NSIM,LPARD,LPAW,LADDGRID, &
+@@ -851,7 +910,7 @@
+ ! ipi open socket
+ !-----------------------------------------------------------------------
+ #ifdef MPI
+-      IF (DYN%IBRION==23) THEN
++      IF (DYN%IBRION==23 .OR. DYN%IBRION==24) THEN
+         IF (COMM%NODE_ME == 1) THEN
+           WRITE(TIU0,*) " DRIVER - Connecting to host ", TRIM(IHOST)
+           IF (INET > 0) THEN
+@@ -860,9 +919,9 @@
+             WRITE(TIU0,*) " using UNIX socket."
+           ENDIF
+           CALL open_socket(SOCKET, INET, PORT, TRIM(IHOST))
+-          WRITE(TIU0,*) "VASP ipi driver (written by Wei Fang) successfully starting"
++          WRITE(TIU0,*) "VASP ipi driver (written by Wei Fang, extended for IBRION=24) successfully starting"
+         ENDIF
+-        ! get initial geometries from ipi
++        ! get initial geometries and, for IBRION=24, initialization parameters from ipi
+       driver_init: DO
+         ! do communication on master node only
+         IF (COMM%NODE_ME == 1) THEN
+@@ -871,6 +930,10 @@
+             IMSG=1
+           ELSE IF (TRIM(HEADER) == "POSDATA") THEN
+             IMSG=2
++          ELSE IF (TRIM(HEADER) == "INIT") THEN
++            IMSG=3
++          ELSE IF (TRIM(HEADER) == "CHGDATA") THEN
++            IMSG=5
+           ELSE
+             IMSG=4
+           ENDIF
+@@ -878,8 +941,12 @@
+         CALL M_bcast_i(COMM,IMSG,1)
+         IF (COMM%NODE_ME == 1) WRITE(TIU0,*) " @ DRIVER MODE: Message from server: ", TRIM(HEADER)
+         IF (IMSG == 1) THEN
+-          IF (COMM%NODE_ME == 1) THEN  ! does not need init
+-            CALL writebuffer(SOCKET, "READY       ", MSGLEN)
++          IF (COMM%NODE_ME == 1) THEN
++            IF (DYN%IBRION==24 .AND. .NOT. INIT_DONE_24) THEN
++              CALL writebuffer(SOCKET, "NEEDINIT    ", MSGLEN)
++            ELSE
++              CALL writebuffer(SOCKET, "READY       ", MSGLEN)
++            ENDIF
+           ENDIF
+         ELSE IF (IMSG == 2) THEN
+           ! receives the positions & the cell data
+@@ -926,6 +993,235 @@
+           DYN%POSIOC=DYN%POSION
+           IF (COMM%NODE_ME == 1) WRITE(TIU0,*) " @ DRIVER MODE: Received initial positions "
+           EXIT driver_init
++        ELSE IF (IMSG == 3 .AND. DYN%IBRION==24) THEN
++          ! receives initialization string and parses NELECT for constant potential mode
++          IF (COMM%NODE_ME == 1) THEN
++            CALL readbuffer(SOCKET, INIT_RID)
++            CALL readbuffer(SOCKET, INITLEN)
++            IF (INITLEN>LEN(INITSTR)) INITLEN=LEN(INITSTR)
++            INITSTR=' '
++            CALL readbuffer(SOCKET, INITSTR, INITLEN)
++            ! very simple parser: look for tokens and read values after ':'
++            !  - NELECT              : target total electron number
++            !  - neutral_electrons   : reference neutral electron count
++            !  - zval_ne             : initial Ne valence ZVAL
++
++            ! initialise Ne-doping related scalars for this INIT
++            NEUTRAL_ELECTRONS_REF = 0._q
++            ZVAL_NE_CURRENT = 0._q
++            Z_AVG_MIN_A = 0._q
++            Z_AVG_MAX_A = 0._q
++
++            ! Parse NELECT
++            NI = INDEX(INITSTR(1:INITLEN), 'NELECT')
++            IF (NI>0) THEN
++              J = INDEX(INITSTR(NI:INITLEN), ':')
++              IF (J>0) THEN
++                J = NI+J
++                DO K=J,INITLEN
++                  IF (INITSTR(K:K)/=' ' .AND. INITSTR(K:K)/=',' .AND. INITSTR(K:K)/=';') THEN
++                    EXIT
++                  ENDIF
++                ENDDO
++                IF (K<=INITLEN) THEN
++                  READ(INITSTR(K:INITLEN),*,ERR=999) INFO%NELECT
++                ENDIF
++              ENDIF
++            ENDIF
++
++            ! Parse neutral_electrons (optional, required for Ne-doping)
++            NI = INDEX(INITSTR(1:INITLEN), 'neutral_electrons')
++            IF (NI>0) THEN
++              J = INDEX(INITSTR(NI:INITLEN), ':')
++              IF (J>0) THEN
++                J = NI+J
++                DO K=J,INITLEN
++                  IF (INITSTR(K:K)/=' ' .AND. INITSTR(K:K)/=',' .AND. INITSTR(K:K)/=';') THEN
++                    EXIT
++                  ENDIF
++                ENDDO
++                IF (K<=INITLEN) THEN
++                  READ(INITSTR(K:INITLEN),*,ERR=999) NEUTRAL_ELECTRONS_REF
++                ENDIF
++              ENDIF
++            ENDIF
++
++            ! Parse zval_ne (optional, required for Ne-doping)
++            NI = INDEX(INITSTR(1:INITLEN), 'zval_ne')
++            IF (NI>0) THEN
++              J = INDEX(INITSTR(NI:INITLEN), ':')
++              IF (J>0) THEN
++                J = NI+J
++                DO K=J,INITLEN
++                  IF (INITSTR(K:K)/=' ' .AND. INITSTR(K:K)/=',' .AND. INITSTR(K:K)/=';') THEN
++                    EXIT
++                  ENDIF
++                ENDDO
++                IF (K<=INITLEN) THEN
++                  READ(INITSTR(K:INITLEN),*,ERR=999) ZVAL_NE_CURRENT
++                ENDIF
++              ENDIF
++            ENDIF
++
++            ! Parse z_avg_min_A (optional, workfunction Z-average window, Angstrom)
++            NI = INDEX(INITSTR(1:INITLEN), 'z_avg_min_A')
++            IF (NI>0) THEN
++              J = INDEX(INITSTR(NI:INITLEN), ':')
++              IF (J>0) THEN
++                J = NI+J
++                DO K=J,INITLEN
++                  IF (INITSTR(K:K)/=' ' .AND. INITSTR(K:K)/=',' .AND. INITSTR(K:K)/=';') THEN
++                    EXIT
++                  ENDIF
++                ENDDO
++                IF (K<=INITLEN) THEN
++                  READ(INITSTR(K:INITLEN),*,ERR=999) Z_AVG_MIN_A
++                ENDIF
++              ENDIF
++            ENDIF
++
++            ! Parse z_avg_max_A (optional, workfunction Z-average window, Angstrom)
++            NI = INDEX(INITSTR(1:INITLEN), 'z_avg_max_A')
++            IF (NI>0) THEN
++              J = INDEX(INITSTR(NI:INITLEN), ':')
++              IF (J>0) THEN
++                J = NI+J
++                DO K=J,INITLEN
++                  IF (INITSTR(K:K)/=' ' .AND. INITSTR(K:K)/=',' .AND. INITSTR(K:K)/=';') THEN
++                    EXIT
++                  ENDIF
++                ENDDO
++                IF (K<=INITLEN) THEN
++                  READ(INITSTR(K:INITLEN),*,ERR=999) Z_AVG_MAX_A
++                ENDIF
++              ENDIF
++            ENDIF
++
++ 1034 999         CONTINUE
++            WRITE(TIU0,*) ' @ DRIVER MODE: Parsed NELECT from INIT for IBRION=24: ', INFO%NELECT
++            IF (NEUTRAL_ELECTRONS_REF>0._q) THEN
++              WRITE(TIU0,*) ' @ DRIVER MODE: Parsed neutral_electrons from INIT: ', NEUTRAL_ELECTRONS_REF
++            ENDIF
++            IF (ZVAL_NE_CURRENT>0._q) THEN
++              WRITE(TIU0,*) ' @ DRIVER MODE: Parsed zval_ne from INIT: ', ZVAL_NE_CURRENT
++            ENDIF
++            IF (Z_AVG_MAX_A>Z_AVG_MIN_A) THEN
++              WRITE(TIU0,*) ' @ DRIVER MODE: Parsed z_avg_min_A/z_avg_max_A from INIT: ', Z_AVG_MIN_A, Z_AVG_MAX_A
++            ENDIF
++          ENDIF
++          CALL M_bcast_d(COMM,INFO%NELECT,1)
++          CALL M_bcast_d(COMM,NEUTRAL_ELECTRONS_REF,1)
++          CALL M_bcast_d(COMM,ZVAL_NE_CURRENT,1)
++          CALL M_bcast_d(COMM,Z_AVG_MIN_A,1)
++          CALL M_bcast_d(COMM,Z_AVG_MAX_A,1)
++
++          ! Determine Ne-doping mode and, if enabled, update the Ne
++          ! pseudopotential valence and recompute NELECT from the
++          ! doping relation. This keeps IBRION=24 behaviour unchanged
++          ! when no Ne-doping parameters are supplied.
++          NE_DOPING_MODE = (NEUTRAL_ELECTRONS_REF>0._q .AND. ZVAL_NE_CURRENT>0._q)
++          IF (NE_DOPING_MODE) THEN
++            ! Identify Ne species type from POTCAR element labels
++            NE_SPECIES_TYPE = 0
++            N_NE_ATOMS = 0
++            DO NT=1,T_INFO%NTYP
++              IF (TRIM(ADJUSTL(P(NT)%ELEMENT))=='Ne' .OR. TRIM(ADJUSTL(P(NT)%ELEMENT))=='NE') THEN
++                NE_SPECIES_TYPE = NT
++                EXIT
++              ENDIF
++            ENDDO
++
++            IF (NE_SPECIES_TYPE<=0) THEN
++              IF (COMM%NODE_ME == 1 .AND. IO%IU0>=0) THEN
++                WRITE(IO%IU0,*) 'ERROR: Ne-doping requested by INIT (neutral_electrons/zval_ne present) but no Ne species was found in POTCAR.'
++              ENDIF
++              STOP
++            ENDIF
++
++            N_NE_ATOMS = T_INFO%NITYP(NE_SPECIES_TYPE)
++            IF (N_NE_ATOMS<=0) THEN
++              IF (COMM%NODE_ME == 1 .AND. IO%IU0>=0) THEN
++                WRITE(IO%IU0,*) 'ERROR: Ne-doping requested but no Ne ions are present in POSCAR (N_NE_ATOMS<=0).'
++              ENDIF
++              STOP
++            ENDIF
++
++            ! Reconstruct NELECT from neutral_electrons and zval_ne.
++            ! The neutral Ne valence is fixed to 8.0 by construction on
++            ! the i-PI side.
++            NELECT_FROM_DOP = NEUTRAL_ELECTRONS_REF + REAL(N_NE_ATOMS,q)*(ZVAL_NE_CURRENT-8._q)
++
++            ! Optional consistency check against NELECT token from INIT
++            DELTA_NELECT = ABS(NELECT_FROM_DOP-INFO%NELECT)
++            IF (DELTA_NELECT>1E-3_q .AND. COMM%NODE_ME == 1 .AND. IO%IU0>=0) THEN
++              WRITE(IO%IU0,*) 'WARNING: Ne-doping INIT NELECT mismatch. From INIT: ', INFO%NELECT, &
++     &                       '  from (neutral_electrons,zval_ne): ', NELECT_FROM_DOP
++            ENDIF
++
++            INFO%NELECT = NELECT_FROM_DOP
++
++            ! Update Ne valence in POTCAR data so that all downstream
++            ! routines (charge, PAW, Ewald, etc.) see the modified
++            ! ZVALF. Both ZVALF and ZVALF_ORIG are updated so that any
++            ! code relying on the "original" valence stays consistent
++            ! within this run.
++            P(NE_SPECIES_TYPE)%ZVALF      = ZVAL_NE_CURRENT
++            P(NE_SPECIES_TYPE)%ZVALF_ORIG = ZVAL_NE_CURRENT
++
++            IF (COMM%NODE_ME == 1 .AND. IO%IU0>=0) THEN
++              WRITE(IO%IU0,*) ' @ DRIVER MODE: Enabled Ne-doping mode: type index = ', NE_SPECIES_TYPE, &
++     &                       ', N_ne = ', N_NE_ATOMS
++              WRITE(IO%IU0,*) ' @ DRIVER MODE: Initial Ne ZVALF set to ', ZVAL_NE_CURRENT, &
++     &                       ', resulting NELECT = ', INFO%NELECT
++            ENDIF
++          ENDIF
++
++          INIT_DONE_24 = .TRUE.
++        ELSE IF (IMSG == 5 .AND. DYN%IBRION==24) THEN
++          ! optional NELECT update before initial positions are received
++          IF (NE_DOPING_MODE) THEN
++            ! In Ne-doping mode, interpret CHGDATA payload as updated
++            ! Ne valence ZVAL (zval_ne) and recompute NELECT.
++            IF (COMM%NODE_ME == 1) THEN
++              CALL readbuffer(SOCKET, ZVAL_NE_CURRENT)
++              CALL readbuffer(SOCKET, IPI_SOLV_FLAG)
++            ENDIF
++            CALL M_bcast_d(COMM,ZVAL_NE_CURRENT,1)
++            CALL M_bcast_i(COMM, IPI_SOLV_FLAG, 1)
++
++            IF (NE_SPECIES_TYPE<=0 .OR. N_NE_ATOMS<=0) THEN
++              IF (COMM%NODE_ME == 1 .AND. IO%IU0>=0) THEN
++                WRITE(IO%IU0,*) 'ERROR: Ne-doping CHGDATA (init) received but Ne species index or atom count is invalid.'
++              ENDIF
++              STOP
++            ENDIF
++
++            P(NE_SPECIES_TYPE)%ZVALF      = ZVAL_NE_CURRENT
++            P(NE_SPECIES_TYPE)%ZVALF_ORIG = ZVAL_NE_CURRENT
++
++            NELECT_FROM_DOP = NEUTRAL_ELECTRONS_REF + REAL(N_NE_ATOMS,q)*(ZVAL_NE_CURRENT-8._q)
++            INFO%NELECT = NELECT_FROM_DOP
++            CALL M_bcast_d(COMM,INFO%NELECT,1)
++
++            IF (COMM%NODE_ME == 1) THEN
++              WRITE(TIU0,*) ' @ DRIVER MODE: Updated Ne-doping ZVALF from CHGDATA (init): ', ZVAL_NE_CURRENT, &
++     &                       ' => NELECT = ', INFO%NELECT
++            ENDIF
++          ELSE
++            ! Default behaviour: treat CHGDATA as NELECT update
++            IF (COMM%NODE_ME == 1) THEN
++              CALL readbuffer(SOCKET, INFO%NELECT)
++              CALL readbuffer(SOCKET, IPI_SOLV_FLAG)
++            ENDIF
++            CALL M_bcast_d(COMM,INFO%NELECT,1)
++            CALL M_bcast_i(COMM, IPI_SOLV_FLAG, 1)
++            IF (COMM%NODE_ME == 1) THEN
++              WRITE(TIU0,*) ' @ DRIVER MODE: Updated NELECT from CHGDATA (init): ', INFO%NELECT
++            ENDIF
++          ENDIF
++
++          IPI_SOLV_ENABLE = (IPI_SOLV_FLAG /= 0)
++          LDO_SOL = (IPI_SOLV_ENABLE .AND. LSOL_SCF)
+         ELSE
+           INFO%LSTOP=.TRUE.
+           IF (COMM%NODE_ME == 1) WRITE(TIU0,*) "EXIT driver or unknow msg received"
+@@ -3489,10 +3785,11 @@ ibrion: IF (DYN%IBRION==0) THEN
+ 
+ !=======================================================================
+ ! DYN%IBRION =
+-! 23  driver mode for ipi
++! 23  driver mode for ipi (original Wei Fang implementation)
++! 24  driver mode for ipi, constant potential (NELECT from INIT, extras JSON)
+ !=======================================================================
+ #ifdef MPI
+-      ELSE IF (DYN%IBRION==23) THEN
++      ELSE IF (DYN%IBRION==23 .OR. DYN%IBRION==24) THEN
+         DYN%POSIOC=DYN%POSION
+         HASDATA=.TRUE.
+ 
+@@ -3506,6 +3803,8 @@ ibrion: IF (DYN%IBRION==0) THEN
+             IMSG=2
+           ELSE IF (TRIM(HEADER) == "GETFORCE") THEN
+             IMSG=3
++          ELSE IF (TRIM(HEADER) == "CHGDATA") THEN
++            IMSG=5
+           ELSE
+             IMSG=4
+           ENDIF
+@@ -3563,6 +3862,72 @@ ibrion: IF (DYN%IBRION==0) THEN
+           EXIT driver_loop
+         ELSE IF (IMSG == 3) THEN
+           ! communicates energy info back to i-pi
++          IF (DYN%IBRION==24) THEN
++            IF (IO%LVTOT.OR.IO%LVHAR .OR. (Z_AVG_MAX_A>Z_AVG_MIN_A)) THEN
++#ifdef MPI
++              IF (WDES%COMM_KINTER%NODE_ME.EQ.1) THEN
++#endif
++                IF (IO%LVHAR) THEN
++                  CALL PUSH_LEXCH(-1)
++                ENDIF
++                IF (IO%LSOL_WRITE .AND. IPI_SOLV_ENABLE) CALL SET_SOL_WRITE
++                CALL POTLOK(GRID,GRIDC,GRID_SOFT, WDES%COMM_INTER, WDES, &
++     &                     INFO,P,T_INFO,E,LATT_CUR, &
++     &                     CHTOT,CSTRF,CVTOT,DENCOR,SV, SOFT_TO_C,XCSIF)
++
++                IF (.NOT. IO%LVHAR) THEN
++                  CALL POTLOK_METAGGA(KINEDEN, &
++     &                   GRID,GRIDC,GRID_SOFT,WDES%COMM_INTER,WDES,INFO,P,T_INFO,E,LATT_CUR, &
++     &                   CHDEN,CHTOT,DENCOR,CVTOT,SV,HAMILTONIAN%MUTOT,HAMILTONIAN%MU,SOFT_TO_C,XCSIF)
++                ENDIF
++
++                IF (IO%LVHAR) THEN
++                  CALL POP_LEXCH
++                ENDIF
++
++                IF ( DIP%IDIPCO >0 ) THEN
++                  LCOR_DIP_SAVE = DIP%LCOR_DIP
++                  DIP%LCOR_DIP=.FALSE.
++                  CALL CDIPOL_CHTOT_REC(GRIDC, LATT_CUR,P,T_INFO, &
++     &                CHTOT,CSTRF,CVTOT, WDES%NCDIJ, INFO%NELECT, E%PSCENC )
++                  DIP%LCOR_DIP = LCOR_DIP_SAVE
++
++                  CALL WRITE_VACUUM_LEVEL(IO%IU6)
++                ENDIF
++
++!               Compute planar-averaged vacuum level along z in the
++!               user-specified window for workfunction mode, without
++!               writing LOCPOT/LOCPOT_Z to disk. Only update when the
++                ! implicit-solvent flag from i-PI is enabled.
++                IF (Z_AVG_MAX_A>Z_AVG_MIN_A .AND. IPI_SOLV_ENABLE) THEN
++                  CALL VACUUM_LEVEL_FROM_CVTOT(GRIDC, LATT_CUR, CVTOT, Z_AVG_MIN_A, Z_AVG_MAX_A, VAC_LEVEL_EV)
++                ENDIF
++#ifdef MPI
++              ENDIF
++#endif
++            ENDIF
++          ENDIF
++          ! Cache/update Fermi level, electron count and (optionally)
++          ! vacuum level / workfunction for the i-PI JSON extras. When
++          ! IPI_SOLV_ENABLE is .TRUE., we refresh the caches; otherwise
++          ! we keep the last values so that i-PI sees a constant set of
++          ! electronic observables between implicit-solvent steps.
++          IF (DYN%IBRION==24) THEN
++            IF (IPI_SOLV_ENABLE) THEN
++              IPI_FERMI_EV = EFERMI
++              IPI_NELECT   = INFO%NELECT
++            ENDIF
++            IF (Z_AVG_MAX_A>Z_AVG_MIN_A) THEN
++#ifdef MPI
++              CALL M_bcast_d(COMM,VAC_LEVEL_EV,1)
++#endif
++              IF (IPI_SOLV_ENABLE) THEN
++                WORKFUNCTION_EV = VAC_LEVEL_EV - EFERMI
++                IPI_VAC_LEVEL_EV = VAC_LEVEL_EV
++                IPI_WORKFUNCTION_EV = WORKFUNCTION_EV
++              ENDIF
++            ENDIF
++          ENDIF
+           IF (COMM%NODE_ME == 1) THEN
+             WRITE(TIU0,*) " @ DRIVER MODE: Returning v,forces,stress "
+             IPIPOT = (TOTEN-E%EENTROPY/(2+NORDER))*EVTOHA
+@@ -3581,10 +3946,85 @@ ibrion: IF (DYN%IBRION==0) THEN
+             CALL writebuffer(SOCKET,NAT)
+             CALL writebuffer(SOCKET,IPIFORCES,3*NAT)
+             CALL writebuffer(SOCKET,VIRIAL,9)
+-            ! i-pi can also receive an arbitrary string, we just send back zero characters.
+-            CALL writebuffer(SOCKET,0)
++            IF (DYN%IBRION==24) THEN
++              ! send JSON extras with Fermi level (eV), electron count, and
++              ! optionally vacuum level / workfunction when a Z-average
++              ! window has been provided by the i-PI driver.
++              IF (Z_AVG_MAX_A>Z_AVG_MIN_A .AND. IPI_VAC_LEVEL_EV /= 0._q) THEN
++                WRITE(EXTRAJSON,'(A,F16.8,A,F16.8,A,F16.8,A,F16.8,A)') &
++     &           '{"fermi_level_eV":', EFERMI, ', "nelect":', REAL(IPI_NELECT,8), &
++     &           ', "vacuum_level_eV":', IPI_VAC_LEVEL_EV, ', "workfunction_eV":', IPI_WORKFUNCTION_EV, '}'
++              ELSE
++                WRITE(EXTRAJSON,'(A,F16.8,A,F16.8,A)') &
++     &           '{"fermi_level_eV":', EFERMI, ', "nelect":', REAL(IPI_NELECT,8), '}'
++              ENDIF
++              EXTRALEN = LEN_TRIM(EXTRAJSON)
++              CALL writebuffer(SOCKET,EXTRALEN)
++              CALL writebuffer(SOCKET,EXTRAJSON,EXTRALEN)
++            ELSE
++              ! i-pi can also receive an arbitrary string, we just send back zero characters.
++              CALL writebuffer(SOCKET,0)
++            ENDIF
+           ENDIF
+           HASDATA=.FALSE.
++        ELSE IF (IMSG == 5) THEN
++          IF (DYN%IBRION==24 .AND. NE_DOPING_MODE) THEN
++            ! In Ne-doping mode for IBRION=24, interpret CHGDATA as an
++            ! updated Ne valence ZVAL and recompute NELECT internally.
++            IF (COMM%NODE_ME == 1) THEN
++              CALL readbuffer(SOCKET, ZVAL_NE_CURRENT)
++              CALL readbuffer(SOCKET, IPI_SOLV_FLAG)
++            ENDIF
++            CALL M_bcast_d(COMM,ZVAL_NE_CURRENT,1)
++            CALL M_bcast_i(COMM, IPI_SOLV_FLAG, 1)
++
++            IF (NE_SPECIES_TYPE<=0 .OR. N_NE_ATOMS<=0) THEN
++              IF (COMM%NODE_ME == 1 .AND. IO%IU0>=0) THEN
++                WRITE(IO%IU0,*) 'ERROR: Ne-doping CHGDATA received but Ne species index or atom count is invalid.'
++              ENDIF
++              STOP
++            ENDIF
++
++            P(NE_SPECIES_TYPE)%ZVALF      = ZVAL_NE_CURRENT
++            P(NE_SPECIES_TYPE)%ZVALF_ORIG = ZVAL_NE_CURRENT
++
++            NELECT_FROM_DOP = NEUTRAL_ELECTRONS_REF + REAL(N_NE_ATOMS,q)*(ZVAL_NE_CURRENT-8._q)
++            INFO%NELECT = NELECT_FROM_DOP
++            CALL M_bcast_d(COMM,INFO%NELECT,1)
++
++            IF (COMM%NODE_ME == 1) THEN
++              WRITE(TIU0,*) ' @ DRIVER MODE: Updated Ne-doping ZVALF from CHGDATA: ', ZVAL_NE_CURRENT, &
++     &                       ' => NELECT = ', INFO%NELECT
++            ENDIF
++          ELSE IF (DYN%IBRION==24) THEN
++            ! Default behaviour: treat CHGDATA as NELECT update.
++            ! In IBRION=24 mode, CHGDATA always carries an extra int32 flag
++            ! (IPI_SOLV_FLAG) after NELECT/ZVAL, which controls per-step
++            ! implicit-solvent / workfunction updates.
++            IF (COMM%NODE_ME == 1) THEN
++              CALL readbuffer(SOCKET, INFO%NELECT)
++              CALL readbuffer(SOCKET, IPI_SOLV_FLAG)
++            ENDIF
++            CALL M_bcast_d(COMM,INFO%NELECT,1)
++            CALL M_bcast_i(COMM, IPI_SOLV_FLAG, 1)
++            IF (COMM%NODE_ME == 1) THEN
++              WRITE(TIU0,*) ' @ DRIVER MODE: Updated NELECT from CHGDATA: ', INFO%NELECT
++            ENDIF
++          ELSE
++            ! Default behaviour: treat CHGDATA as NELECT update
++            IF (COMM%NODE_ME == 1) THEN
++              CALL readbuffer(SOCKET, INFO%NELECT)
++            ENDIF
++            CALL M_bcast_d(COMM,INFO%NELECT,1)
++            IF (COMM%NODE_ME == 1) THEN
++              WRITE(TIU0,*) ' @ DRIVER MODE: Updated NELECT from CHGDATA: ', INFO%NELECT
++            ENDIF
++          ENDIF
++
++          IF (DYN%IBRION==24) THEN
++            IPI_SOLV_ENABLE = (IPI_SOLV_FLAG /= 0)
++            LDO_SOL = (IPI_SOLV_ENABLE .AND. LSOL_SCF)
++          ENDIF
+         ELSE
+           INFO%LSTOP=.TRUE.
+           IF (COMM%NODE_ME == 1) WRITE(TIU0,*) "EXIT driver or unknow msg received"
+@@ -3928,10 +4368,15 @@ ibrion: IF (DYN%IBRION==0) THEN
+         
+ !-----------------------------------------------------------------------
+ ! update number of electrons for constant potential calculation
+-!-----------------------------------------------------------------------
+-        INFO%LSTOP = INFO%LSTOP .AND. check_EFERMI(EFERMI)
+-        IF (.NOT. INFO%LSTOP) &
+-           CALL update_NELECT(INFO%NELECT, EFERMI)
++! NOTE: for IBRION=24 (i-PI constant potential driver) NELECT is
++!       fully controlled by i-PI via the INIT message. In that case
++!       we skip the internal constant-potential NELECT update logic.
++!-----------------------------------------------------------------------
++        IF (DYN%IBRION /= 24) THEN
++          INFO%LSTOP = INFO%LSTOP .AND. check_EFERMI(EFERMI)
++          IF (.NOT. INFO%LSTOP) &
++     &       CALL update_NELECT(INFO%NELECT, EFERMI)
++        ENDIF
+ !-----------------------------------------------------------------------
+         
+         io_begin
+@@ -4504,7 +4949,7 @@ ibrion: IF (DYN%IBRION==0) THEN
+ ! comment out the following line to add  exchange correlation
+          IF (IO%LVHAR) CALL SET_LEXCH(-1)
+          ! solvation - write out ionic and bound charges in vaspsol
+-         CALL SET_SOL_WRITE
++         IF (IO%LSOL_WRITE) CALL SET_SOL_WRITE
+          ! solvation - 
+          CALL POTLOK(GRID,GRIDC,GRID_SOFT, WDES%COMM_INTER, WDES, &
+                   INFO,P,T_INFO,E,LATT_CUR, &
+@@ -4518,9 +4963,11 @@ ibrion: IF (DYN%IBRION==0) THEN
+ 
+          ! call the dipol routine without changing the potential
+          IF ( DIP%IDIPCO >0 ) THEN
++           LCOR_DIP_SAVE = DIP%LCOR_DIP
+            DIP%LCOR_DIP=.FALSE.
+            CALL CDIPOL_CHTOT_REC(GRIDC, LATT_CUR,P,T_INFO, &
+                CHTOT,CSTRF,CVTOT, WDES%NCDIJ, INFO%NELECT, E%PSCENC )
++           DIP%LCOR_DIP = LCOR_DIP_SAVE
+ 
+            CALL WRITE_VACUUM_LEVEL(IO%IU6)
+          ENDIF
+diff -rupN src/reader.F /home/zhangchenyu/work2/20260310-xiugai/vasp/vasp.5.4.4/src/reader.F
+--- src/reader.F	2026-03-11 20:30:42.367629472 +0800
++++ /home/zhangchenyu/work2/20260310-xiugai/vasp/vasp.5.4.4/src/reader.F	2026-03-11 20:47:41.137568748 +0800
+@@ -12,7 +12,7 @@
+      &        PSTRESS,NDAV, &
+      &        SIGMA,LTET,WEIMIN,EBREAK,DEPER,NWRITE,LCORR, &
+      &        IDIOT,NIONS,NTYPP,lmusic,LOPTICS,STM, &
+-     &        ISPIN,ATOMOM,NIOND,LWAVE,LDOWNSAMPLE,LCHARG,LVTOT,LVHAR,SZPREC, &
++     &        ISPIN,ATOMOM,NIOND,LWAVE,LDOWNSAMPLE,LCHARG,LVTOT,LVHAR,LSOL_WRITE,SZPREC, &
+      &        ENAUG,LORBIT,LELF,ROPT,ENINI, &
+      &        NGX,NGY,NGZ,NGXF,NGYF,NGZF,NBANDS,NEDOS,NBLK,LATT_CUR, &
+      &        LPLANE_WISE,LCOMPAT,LMAX_CALC,LMAX_MIX,NSIM,LPARD,LPAW,LADDGRID, &
+@@ -51,7 +51,7 @@
+       CHARACTER (40)   SZNAM
+       CHARACTER (6)    SZPREC
+       LOGICAL   LDUM,MIXFIRST,LFOUND,LDIAG,LSUBROT,LREAL,LREALD,LPDENS,LTET,LOPTICS, &
+-     &          LCORR,LOPEN,lmusic,LWAVE,LDOWNSAMPLE,LCHARG,LVTOT,LVHAR, &
++     &          LCORR,LOPEN,lmusic,LWAVE,LDOWNSAMPLE,LCHARG,LVTOT,LVHAR,LSOL_WRITE, &
+      &          LORBIT_,LELF,LCOMPAT,LPARD,LPAW,LADDGRID, &
+      &          LNONCOLLINEAR,LSORBIT,LMETAGGA, &
+      &          LBEEFENS,LBEEFBAS, &
+@@ -597,7 +597,7 @@
+ ! number of ionic steps, calculate stresses? (default NSW=0, ISIF=2):
+       NSW=0
+       IF (IBRION==5 .OR. IBRION==6 .OR. IBRION==7 .OR. IBRION==8) NSW=1
+-      IF (IBRION==23) NSW=100000 ! default large steps for ipi driver
++      IF (IBRION==23 .OR. IBRION==24) NSW=1000000 ! default large steps for ipi driver
+       CALL RDATAB(LOPEN,INCAR,IU5,'NSW','=','#',';','I', &
+      &            NSW,RDUM,CDUM,LDUM,CHARAC,N,1,IERR)
+       IF (((IERR/=0).AND.(IERR/=3)).OR. &
+@@ -612,8 +612,6 @@
+       ISIF=2
+       ! if MD is selected dont calculate stress
+       IF (IBRION==0) ISIF=0
+-      ! ipi driver mode default calculate stress and allow cell to change
+-      IF (IBRION==23) ISIF=3
+       CALL RDATAB(LOPEN,INCAR,IU5,'ISIF','=','#',';','I', &
+      &            ISIF,RDUM,CDUM,LDUM,CHARAC,N,1,IERR)
+       IF (((IERR/=0).AND.(IERR/=3)).OR. &
+@@ -635,7 +633,7 @@
+ ! relaxation: IWAVPR=1
+       IF (IBRION>0) IWAVPR=1
+ ! ipi driver mode default wavefunction extrapolation same as relaxation
+-      IF (IBRION==23) IWAVPR=1
++      IF (IBRION==23 .OR. IBRION==24) IWAVPR=1
+       CALL RDATAB(LOPEN,INCAR,IU5,'IWAVPR','=','#',';','I', &
+      &            IWAVPR,RDUM,CDUM,LDUM,CHARAC,N,1,IERR)
+       IF (((IERR/=0).AND.(IERR/=3)).OR. &
+@@ -658,7 +656,7 @@
+       CALL XML_INCAR('IWAVPR','I',IWAVPR,RDUM,CDUM,LDUM,CHARAC,N)
+       
+ ! read ipi host & port 
+-      IF (IBRION==23) THEN
++      IF (IBRION==23 .OR. IBRION==24) THEN
+         SZNAM='localhost'
+         CALL RDATAB(LOPEN,INCAR,IU5,'IHOST','=','#',';','S', &
+         &            IDUM,RDUM,CDUM,LDUM,SZNAM,N,256,IERR)
+@@ -694,7 +692,7 @@
+ 
+ ! switch on symmetry (default ISYM=1):
+       ISYM=1 ; IF (LPAW) ISYM=2
+-      IF (IBRION==23) ISYM=0 ! default no symm for ipi driver mode
++      IF (IBRION==23 .OR. IBRION==24) ISYM=0 ! default no symm for ipi driver mode
+       CALL RDATAB(LOPEN,INCAR,IU5,'ISYM','=','#',';','I', &
+      &            ISYM,RDUM,CDUM,LDUM,CHARAC,N,1,IERR)
+       IF (((IERR/=0).AND.(IERR/=3)).OR. &
+@@ -1489,6 +1487,7 @@
+ 
+ ! ... but maybe in the Hartree potential?
+       LVHAR=.FALSE.
++      IF (IBRION==24) LVHAR=.TRUE.
+       CALL RDATAB(LOPEN,INCAR,IU5,'LVHAR','=','#',';','L', &
+      &            IDUM,RDUM,CDUM,LVHAR,CHARAC,N,1,IERR)
+       IF (((IERR/=0).AND.(IERR/=3)).OR. &
+@@ -1501,6 +1500,20 @@
+       ! if one request the Hartree potential LVHAR supercedes the LVTOT
+       IF (LVHAR) LVTOT=.FALSE.
+ 
++! control writing of vaspsol auxiliary grid files (SVDW, VSOLV, ...)
++! default: enabled whenever either LVTOT or LVHAR is requested, which
++! reproduces the behaviour of the unmodified vaspsol++ code.
++      LSOL_WRITE = (LVTOT .OR. LVHAR)
++      CALL RDATAB(LOPEN,INCAR,IU5,'LSOL_WRITE','=','#',';','L', &
++     &            IDUM,RDUM,CDUM,LSOL_WRITE,CHARAC,N,1,IERR)
++      IF (((IERR/=0).AND.(IERR/=3)).OR. &
++     &                    ((IERR==0).AND.(N<1))) THEN
++         IF (IU0>=0) &
++         WRITE(IU0,*)'Error reading item ''LSOL_WRITE'' from file INCAR.'
++         GOTO 150
++      ENDIF
++      CALL XML_INCAR('LSOL_WRITE','L',IDUM,RDUM,CDUM,LSOL_WRITE,CHARAC,N)
++
+ ! read in flag LORBIT
+       LORBIT_=.FALSE.
+       LORBIT=0
+diff -rupN src/solvation.F /home/zhangchenyu/work2/20260310-xiugai/vasp/vasp.5.4.4/src/solvation.F
+--- src/solvation.F	2026-03-11 20:28:45.855636416 +0800
++++ /home/zhangchenyu/work2/20260310-xiugai/vasp/vasp.5.4.4/src/solvation.F	2026-03-11 20:47:41.161568747 +0800
+@@ -3154,7 +3154,7 @@ MODULE solvation
+ 
+  PRIVATE
+  
+- PUBLIC :: SOL_READER, SOL_INIT, SOL_WRITER, XML_WRITE_SOL, LDO_SOL
++ PUBLIC :: SOL_READER, SOL_INIT, SOL_WRITER, XML_WRITE_SOL, LDO_SOL, LSOL_SCF
+  PUBLIC :: SOL_VCORRECTION, SET_RMS_SCF, SET_SOL_WRITE, update_NELECT, check_EFERMI, L_const_pot
+  PUBLIC :: Ecorr_sol, V_corr, n_solv
+  
