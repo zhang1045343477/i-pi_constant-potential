@@ -16,6 +16,7 @@ from ipi.utils.inputvalue import (
 )
 from ipi.inputs.barostats import InputBaro
 from ipi.inputs.thermostats import InputThermo
+from ipi.inputs.electrons import InputElectrons
 
 
 __all__ = ["InputDynamics"]
@@ -109,6 +110,13 @@ class InputDynamics(InputDictionary):
                 "help": "Number of iterations for each MTS level (including the outer loop, that should in most cases have just one iteration).",
             },
         ),
+        "electrons": (
+            InputElectrons,
+            {
+                "default": None,  # Optional field - only create if explicitly specified
+                "help": "Electronic degrees of freedom for constant Fermi level MD simulations.",
+            },
+        ),
     }
 
     dynamic = {}
@@ -132,6 +140,9 @@ class InputDynamics(InputDictionary):
         self.barostat.store(dyn.barostat)
         self.nmts.store(dyn.nmts)
         self.splitting.store(dyn.splitting)
+        if hasattr(dyn, 'electrons_config') and dyn.electrons_config is not None:
+            # Store runtime state (including current charge) for restart
+            self.electrons.store_runtime_state(dyn)
 
     def fetch(self):
         """Creates an ensemble object.
@@ -144,4 +155,10 @@ class InputDynamics(InputDictionary):
         rv = super(InputDynamics, self).fetch()
         rv["mode"] = self.mode.fetch()
         rv["splitting"] = self.splitting.fetch()
+
+        # Only include electrons if explicitly specified in XML
+        electrons_config = self.electrons.fetch()
+        if electrons_config is not None:
+            rv["electrons"] = electrons_config
+
         return rv
